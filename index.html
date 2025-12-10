@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Map Overlay Visualization</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+        }
+
+        #map {
+            width: 100%;
+            height: 100%;
+        }
+
+        h1 {
+            font-size: 20px;
+            margin-bottom: 20px;
+            color: #333;
+        }
+
+        h2 {
+            font-size: 16px;
+            margin-bottom: 10px;
+            margin-top: 20px;
+            color: #555;
+        }
+
+        .control-group {
+            margin-bottom: 20px;
+            padding: 15px;
+            background: white;
+            border-radius: 5px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        .overlay-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .overlay-item label {
+            flex: 1;
+            cursor: pointer;
+        }
+
+        .overlay-item input[type="checkbox"] {
+            margin-right: 10px;
+        }
+
+        .overlay-item input[type="range"] {
+            width: 60px;
+            margin-left: 10px;
+        }
+
+        button {
+            background: #007cba;
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+        }
+
+        button:hover {
+            background: #005a87;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .file-label {
+            display: inline-block;
+            background: #28a745;
+            color: white;
+            padding: 8px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        .file-label:hover {
+            background: #1e7e34;
+        }
+
+        textarea {
+            width: 100%;
+            min-height: 100px;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            margin-bottom: 10px;
+        }
+
+        .color-picker {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .color-picker input[type="color"] {
+            width: 50px;
+            height: 30px;
+            border: none;
+            cursor: pointer;
+        }
+
+        .selection-rect {
+            fill: rgba(0, 123, 255, 0.1);
+            stroke: #007bff;
+            stroke-width: 2;
+            stroke-dasharray: 5, 5;
+        }
+
+        .status-message {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        .status-info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+
+        .status-success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .controls {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+            background: white;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        .controls button {
+            background: #007cba;
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        .controls button:hover {
+            background: #005a87;
+        }
+    </style>
+</head>
+<body>
+    <div class="controls">
+        <button id="selectStreets">Select Streets (Ctrl+Click)</button>
+        <button id="clearStreets" style="background: #dc3545;">Clear</button>
+    </div>
+
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+    <script>
+        // Initialize map
+        let map = L.map('map').setView([51.045, -114.065], 13);
+
+        // Map providers
+        const mapProviders = {
+            openstreetmap: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+            cartodb: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png',
+            'cartodb-dark': 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'
+        };
+
+        let currentTileLayer = L.tileLayer(mapProviders.openstreetmap, {
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        // Street selection
+        let streetsLayer = L.layerGroup().addTo(map);
+        let isSelecting = false;
+        let isDrawingRect = false;
+        let selectionStart = null;
+        let selectionRect = null;
+        let selectionLayer = L.layerGroup().addTo(map);
+
+  
+        // Street selection functionality
+        document.getElementById('selectStreets').addEventListener('click', () => {
+            isSelecting = true;
+            map.getContainer().style.cursor = 'crosshair';
+            map.dragging.disable();
+            map.doubleClickZoom.disable();
+            console.log('Street selection mode activated');
+        });
+
+        // Add Ctrl+Click shortcut for street selection
+        map.on('mousedown', (e) => {
+            if (e.originalEvent.ctrlKey || e.originalEvent.metaKey) {
+                e.originalEvent.preventDefault();
+                isSelecting = true;
+                map.getContainer().style.cursor = 'crosshair';
+                map.dragging.disable();
+                map.doubleClickZoom.disable();
+                selectionStart = e.latlng;
+                isSelecting = false;
+                isDrawingRect = true;
+
+                selectionRect = L.rectangle([[selectionStart.lat, selectionStart.lng],
+                                             [selectionStart.lat, selectionStart.lng]], {
+                    color: '#007bff',
+                    weight: 2,
+                    fillOpacity: 0.1,
+                    dashArray: '5, 5'
+                }).addTo(selectionLayer);
+            }
+        });
+
+        document.getElementById('clearStreets').addEventListener('click', () => {
+            streetsLayer.clearLayers();
+        });
+
+        // Map mouse events for rectangle selection
+        map.on('mousedown', (e) => {
+            if (!isSelecting || e.originalEvent.ctrlKey || e.originalEvent.metaKey) return;
+
+            // Prevent the map from handling this event
+            L.DomEvent.preventDefault(e.originalEvent);
+            L.DomEvent.stopPropagation(e.originalEvent);
+
+            selectionStart = e.latlng;
+            isSelecting = false;
+            isDrawingRect = true;
+
+            selectionRect = L.rectangle([[selectionStart.lat, selectionStart.lng],
+                                         [selectionStart.lat, selectionStart.lng]], {
+                color: '#007bff',
+                weight: 2,
+                fillOpacity: 0.1,
+                dashArray: '5, 5'
+            }).addTo(selectionLayer);
+        });
+
+        map.on('mousemove', (e) => {
+            if (!isDrawingRect || !selectionRect) return;
+
+            // Prevent the map from handling this event
+            L.DomEvent.preventDefault(e.originalEvent);
+            L.DomEvent.stopPropagation(e.originalEvent);
+
+            const bounds = L.latLngBounds(selectionStart, e.latlng);
+            selectionRect.setBounds(bounds);
+        });
+
+        map.on('mouseup', async (e) => {
+            if (!isDrawingRect || !selectionRect) return;
+
+            // Prevent the map from handling this event
+            L.DomEvent.preventDefault(e.originalEvent);
+            L.DomEvent.stopPropagation(e.originalEvent);
+
+            const bounds = selectionRect.getBounds();
+            selectionRect.remove();
+            selectionRect = null;
+            isDrawingRect = false;
+
+            // Re-enable map controls
+            map.getContainer().style.cursor = '';
+            map.dragging.enable();
+            map.doubleClickZoom.enable();
+
+            await fetchStreetsInBounds(bounds);
+        });
+
+        // Also handle click to cancel selection
+        map.on('click', (e) => {
+            if (isSelecting && !isDrawingRect) {
+                // Cancel selection mode
+                isSelecting = false;
+                map.getContainer().style.cursor = '';
+                map.dragging.enable();
+                map.doubleClickZoom.enable();
+            }
+        });
+
+        // Fetch streets using Overpass API
+        async function fetchStreetsInBounds(bounds) {
+            try {
+                const overpassQuery = `
+                    [out:json][timeout:30];
+                    (
+                        way["highway"~"^(primary|secondary|tertiary|residential|unclassified)$"](${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()});
+                    );
+                    (._;>;);
+                    out geom;
+                `;
+
+                const response = await fetch('https://overpass-api.de/api/interpreter', {
+                    method: 'POST',
+                    body: overpassQuery
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                highlightStreets(data);
+
+            } catch (error) {
+                console.error('Error fetching streets:', error);
+            }
+        }
+
+        // Convert Overpass data to GeoJSON
+        function overpassToGeoJSON(overpassData) {
+            const features = [];
+
+            // Process ways (roads)
+            if (overpassData.elements) {
+                overpassData.elements.forEach(element => {
+                    if (element.type === 'way' && element.geometry) {
+                        const coordinates = element.geometry.map(node => [node.lon, node.lat]);
+
+                        // Create feature with geometry
+                        const feature = {
+                            type: 'Feature',
+                            properties: {
+                                name: element.tags?.name || 'Unnamed street',
+                                highway: element.tags?.highway || 'road',
+                                id: element.id
+                            },
+                            geometry: {
+                                type: 'LineString',
+                                coordinates: coordinates
+                            }
+                        };
+
+                        // Apply smoothing and simplification
+                        const smoothedFeature = smoothStreetGeometry(feature);
+                        features.push(smoothedFeature);
+                    }
+                });
+            }
+
+            return {
+                type: 'FeatureCollection',
+                features: features
+            };
+        }
+
+        // Smooth and simplify street geometry
+        function smoothStreetGeometry(feature) {
+            try {
+                // Convert to Turf.js feature
+                const line = turf.lineString(feature.geometry.coordinates, feature.properties);
+
+                // Simplify the line (remove small artifacts)
+                const simplified = turf.simplify(line, {
+                    tolerance: 0.00001, // Very small tolerance to preserve main shape
+                    highQuality: false
+                });
+
+                // Smooth by removing very short segments
+                const coords = simplified.geometry.coordinates;
+                const smoothedCoords = [];
+
+                for (let i = 0; i < coords.length; i++) {
+                    if (i === 0 || i === coords.length - 1) {
+                        // Always keep first and last points
+                        smoothedCoords.push(coords[i]);
+                    } else {
+                        // Check if segment is long enough to keep
+                        const dist = turf.distance(
+                            turf.point(coords[i-1]),
+                            turf.point(coords[i]),
+                            { units: 'kilometers' }
+                        );
+
+                        // Keep point if it's at least 5 meters from previous point
+                        if (dist > 0.005) {
+                            smoothedCoords.push(coords[i]);
+                        }
+                    }
+                }
+
+                return {
+                    type: 'Feature',
+                    properties: feature.properties,
+                    geometry: {
+                        type: 'LineString',
+                        coordinates: smoothedCoords
+                    }
+                };
+            } catch (error) {
+                console.warn('Error smoothing geometry:', error);
+                return feature; // Return original if smoothing fails
+            }
+        }
+
+        // Highlight streets on the map
+        function highlightStreets(overpassData) {
+            const geojson = overpassToGeoJSON(overpassData);
+
+            const streetLayer = L.geoJSON(geojson, {
+                style: {
+                    color: '#000000',
+                    weight: 4,
+                    opacity: 0.9
+                },
+                onEachFeature: (feature, layer) => {
+                    if (feature.properties.name) {
+                        layer.bindPopup(`
+                            <strong>${feature.properties.name}</strong><br>
+                            Type: ${feature.properties.highway}<br>
+                            ID: ${feature.properties.id}
+                        `);
+                    }
+                }
+            }).addTo(streetsLayer);
+
+            const streetCount = geojson.features.length;
+
+            // Center map horizontally to fit all streets
+            if (geojson.features.length > 0) {
+                const bounds = streetLayer.getBounds();
+                if (bounds.isValid()) {
+                    const center = bounds.getCenter();
+                    map.setView(center, map.getZoom());
+                }
+            }
+        }
+
+        </script>
+</body>
+</html>
