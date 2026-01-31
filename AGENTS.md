@@ -62,11 +62,15 @@ Single-page app using modular JavaScript.
 **File structure:**
 ```
 index.html          # UI shell, map init, orchestration
-config.js           # Google API key (window.GOOGLE_CONFIG)
+config.js           # Google API key + detection API config
 js/
 ├── utils.js        # Progress bar, error display
 ├── streets.js      # Overpass API, street sampling with turf.bearing()
-└── streetview.js   # Session tokens, panoIds bulk fetch, panorama display
+├── streetview.js   # Session tokens, panoIds bulk fetch, panorama display
+└── detection.js    # YOLO detection API calls, bounding box rendering
+backend/
+├── main.py         # FastAPI detection service
+└── requirements.txt
 ```
 
 **Key pieces:**
@@ -80,10 +84,30 @@ js/
 - **Driver perspective:** Heading = street bearing ± 45° (right/left toggle), handles one-way streets via OSM `oneway` tag.
 
 **Config coupling:**
-- `config.js` exports `window.GOOGLE_CONFIG.API_KEY`.
+- `config.js` exports `window.GOOGLE_CONFIG.API_KEY` and `window.DETECTION_CONFIG`.
 - Session tokens cached in `localStorage` (~13 days).
 
-### 2) ML / training workflow (`datasets/`, `configs/`, `notebooks/`)
+### 2) Detection backend (`backend/`)
+FastAPI service that runs YOLO11 inference on Street View images.
+
+**Start the detection server:**
+```bash
+# Install dependencies (first time)
+uv venv && uv pip install --python .venv/bin/python -r backend/requirements.txt
+
+# Run server on port 8000
+.venv/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+```
+
+**API endpoints:**
+- `GET /health` — Health check
+- `POST /detect` — Run detection on image URL
+  - Request: `{"image_url": "...", "confidence": 0.15}`
+  - Response: `{"detections": [{"x1", "y1", "x2", "y2", "confidence", "class_name"}], "inference_time_ms": ...}`
+
+**Model:** `notebooks/output/test_run/train/weights/best.pt` (YOLO11n, 1 class: `parking_sign`)
+
+### 3) ML / training workflow (`datasets/`, `configs/`, `notebooks/`)
 Data flow:
 - Raw datasets under `datasets/` → `datasets/build_unified_dataset.py` converts/resizes into a **single-class** YOLO dataset (512x512) and writes `data.yaml`.
 - Training is documented in `notebooks/README.md` and implemented in `notebooks/parking_sign_training.ipynb`.
@@ -96,6 +120,6 @@ Docker flow:
   - `notebooks/output` → `/kaggle/working/output`
 
 ## Sharp edges / mismatches to be aware of
-- `package.json` references `src/index.html`, but this repo’s source HTML is currently `index.html` at the repo root (no `src/` directory). The `npm run build` script may need updating.
-- `run-sign-detector.sh` / `start-sign-detector.sh` expect a `sign-detector/` directory with `backend/` + `frontend/` (FastAPI + bun/npm). That directory is not part of the tracked files in this repo.
-- The docs in `README.md` / `docs/api-reference.md` describe a broader “overlay app” UI than what’s currently present in `index.html` (use `index.html` as the source of truth).
+- `package.json` references `src/index.html`, but this repo's source HTML is currently `index.html` at the repo root (no `src/` directory). The `npm run build` script may need updating.
+- The docs in `README.md` / `docs/api-reference.md` describe a broader "overlay app" UI than what's currently present in `index.html` (use `index.html` as the source of truth).
+- Detection requires the backend to be running (`http://localhost:8000`). If unavailable, UI gracefully degrades to showing just the 360° panorama.

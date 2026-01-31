@@ -123,6 +123,70 @@
         #closePanorama:hover {
             background: white;
         }
+
+        /* Detection Modal */
+        #detectionModal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.95);
+            z-index: 2000;
+        }
+
+        #detectionModal.visible {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #detectionControls {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            z-index: 2001;
+            display: flex;
+            gap: 10px;
+        }
+
+        #detectionControls button {
+            background: rgba(255,255,255,0.9);
+            color: #333;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        #detectionControls button:hover {
+            background: white;
+        }
+
+        #detectionCanvas {
+            max-width: 90vw;
+            max-height: 80vh;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        }
+
+        #detectionStatus {
+            color: white;
+            margin-top: 15px;
+            font-size: 16px;
+            text-align: center;
+        }
+
+        #detectionInfo {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: rgba(255,255,255,0.7);
+            font-size: 12px;
+        }
     </style>
 </head>
 <body>
@@ -152,6 +216,17 @@
         <div id="panoramaContainer"></div>
     </div>
 
+    <!-- Detection Modal -->
+    <div id="detectionModal">
+        <div id="detectionControls">
+            <button id="view360Btn">🔄 View 360°</button>
+            <button id="closeDetection">✕ Close</button>
+        </div>
+        <canvas id="detectionCanvas"></canvas>
+        <div id="detectionStatus">Loading...</div>
+        <div id="detectionInfo"></div>
+    </div>
+
     <!-- External Libraries -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
@@ -161,6 +236,7 @@
     <script src="js/utils.js"></script>
     <script src="js/streets.js"></script>
     <script src="js/streetview.js"></script>
+    <script src="js/detection.js"></script>
 
     <!-- Google Maps API (loaded after config.js so we have the API key) -->
     <script>
@@ -251,10 +327,20 @@
                 }
             });
 
-            // Escape key to close modal
+            // Detection modal controls
+            document.getElementById('closeDetection').addEventListener('click', closeDetectionModal);
+            document.getElementById('view360Btn').addEventListener('click', openCurrentIn360);
+            document.getElementById('detectionModal').addEventListener('click', (e) => {
+                if (e.target.id === 'detectionModal') {
+                    closeDetectionModal();
+                }
+            });
+
+            // Escape key to close modals
             document.addEventListener('keydown', (e) => {
                 if (e.key === 'Escape') {
                     closePanoramaModal();
+                    closeDetectionModal();
                 }
             });
 
@@ -490,10 +576,13 @@
             }
         }
 
+        // Store current detection context for "View 360°" button
+        let currentDetectionContext = null;
+
         /**
-         * Handle dot click - open panorama.
+         * Handle dot click - run detection and show results.
          */
-        function onDotClick(index) {
+        async function onDotClick(index) {
             const point = currentPoints[index];
             const panoId = currentPanoIds[index];
 
@@ -502,10 +591,50 @@
             const side = document.getElementById('sideToggle').value;
             const heading = calculateDriverHeading(point.bearing, point.oneway, side);
 
-            // Show modal
-            document.getElementById('panoramaModal').classList.add('visible');
+            // Store context for 360 view
+            currentDetectionContext = { panoId, heading, point };
 
-            // Open panorama
+            // Show detection modal
+            const modal = document.getElementById('detectionModal');
+            const canvas = document.getElementById('detectionCanvas');
+            const statusEl = document.getElementById('detectionStatus');
+            const infoEl = document.getElementById('detectionInfo');
+
+            modal.classList.add('visible');
+            statusEl.textContent = 'Loading...';
+            infoEl.textContent = `${point.streetName} • Heading: ${Math.round(heading)}°`;
+
+            // Run detection
+            try {
+                await detectAndRender(panoId, heading, canvas, statusEl);
+            } catch (err) {
+                // If detection fails, offer to view in 360
+                console.error('Detection failed:', err);
+                statusEl.textContent = 'Detection unavailable. Click "View 360°" to see panorama.';
+            }
+        }
+
+        /**
+         * Close detection modal.
+         */
+        function closeDetectionModal() {
+            document.getElementById('detectionModal').classList.remove('visible');
+            currentDetectionContext = null;
+        }
+
+        /**
+         * Open current view in 360° panorama.
+         */
+        function openCurrentIn360() {
+            if (!currentDetectionContext) return;
+
+            const { panoId, heading } = currentDetectionContext;
+
+            // Close detection modal
+            closeDetectionModal();
+
+            // Open panorama modal
+            document.getElementById('panoramaModal').classList.add('visible');
             openPanorama(panoId, heading, document.getElementById('panoramaContainer'));
         }
 
