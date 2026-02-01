@@ -9,9 +9,10 @@
  * @param {number} heading - View heading in degrees
  * @param {number} width - Image width (max 640)
  * @param {number} height - Image height (max 640)
+ * @param {number} zoom - Zoom level (0-3, default 0)
  * @returns {string} Street View Static API URL
  */
-function getStreetViewImageUrl(panoId, heading, width = 640, height = 640) {
+function getStreetViewImageUrl(panoId, heading, width = 640, height = 640, zoom = 0) {
     const apiKey = window.GOOGLE_CONFIG?.API_KEY;
     if (!apiKey) {
         throw new Error('Google API key not configured');
@@ -22,6 +23,7 @@ function getStreetViewImageUrl(panoId, heading, width = 640, height = 640) {
         `&pano=${panoId}` +
         `&heading=${heading}` +
         `&pitch=-5` +
+        `&zoom=${zoom}` +
         `&key=${apiKey}`;
 }
 
@@ -139,8 +141,8 @@ function loadImage(url) {
 async function detectAndRender(panoId, heading, canvas, statusEl) {
     const ctx = canvas.getContext('2d');
     
-    // Build image URL
-    const imageUrl = getStreetViewImageUrl(panoId, heading, 640, 640);
+    // Build image URL with zoom level 1 for closer view
+    const imageUrl = getStreetViewImageUrl(panoId, heading, 640, 640, 1);
     
     // Update status
     if (statusEl) statusEl.textContent = 'Loading image...';
