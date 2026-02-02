@@ -178,11 +178,17 @@ function openPanorama(panoId, heading, containerEl) {
             pano: panoId,
             pov: { heading, pitch: -5 },
             zoom: 1,
+            zoomControl: true,
             addressControl: true,
             showRoadLabels: true,
             motionTracking: false,
             motionTrackingControl: false
         });
+        // Allow zoom up to 8x
+        panoramaInstance.set('zoom', 1);
+        if (panoramaInstance.setMaxZoom) {
+            panoramaInstance.setMaxZoom(8);
+        }
     } else {
         panoramaInstance.setPano(panoId);
         panoramaInstance.setPov({ heading, pitch: -5 });

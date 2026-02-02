@@ -163,6 +163,19 @@
             background: white;
         }
 
+        #detectionControls select {
+            padding: 10px 12px;
+            border-radius: 4px;
+            border: none;
+            font-size: 14px;
+            cursor: pointer;
+            background: rgba(255,255,255,0.9);
+        }
+
+        #detectionControls select:hover {
+            background: white;
+        }
+
         #detectionPanorama {
             width: 100%;
             height: 100%;
@@ -251,6 +264,10 @@
     <!-- Detection Modal -->
     <div id="detectionModal">
         <div id="detectionControls">
+            <select id="detectionSideToggle">
+                <option value="right">Right side</option>
+                <option value="left">Left side</option>
+            </select>
             <button id="redetectBtn">🔍 Detect</button>
             <button id="closeDetection">✕ Close</button>
         </div>
@@ -265,11 +282,11 @@
     <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
     
     <!-- Config and Modules -->
-    <script src="config.js"></script>
-    <script src="js/utils.js"></script>
-    <script src="js/streets.js"></script>
-    <script src="js/streetview.js"></script>
-    <script src="js/detection.js"></script>
+    <script src="../config.js"></script>
+    <script src="../js/utils.js"></script>
+    <script src="../js/streets.js"></script>
+    <script src="../js/streetview.js"></script>
+    <script src="../js/detection.js"></script>
 
     <!-- Google Maps API (loaded after config.js so we have the API key) -->
     <script>
@@ -281,7 +298,7 @@
                 return;
             }
             const script = document.createElement('script');
-            script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=streetview&callback=initApp`;
+            script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&callback=initApp`;
             script.async = true;
             script.defer = true;
             document.head.appendChild(script);
@@ -367,6 +384,14 @@
                 if (e.target.id === 'detectionModal') {
                     closeDetectionModal();
                 }
+            });
+
+            // Sync side toggles between map controls and detection modal
+            document.getElementById('detectionSideToggle').addEventListener('change', (e) => {
+                document.getElementById('sideToggle').value = e.target.value;
+            });
+            document.getElementById('sideToggle').addEventListener('change', (e) => {
+                document.getElementById('detectionSideToggle').value = e.target.value;
             });
 
             // Escape key to close modals
@@ -660,6 +685,9 @@
             const modal = document.getElementById('detectionModal');
             const statusEl = document.getElementById('detectionStatus');
             const infoEl = document.getElementById('detectionInfo');
+
+            // Sync side toggle to detection modal
+            document.getElementById('detectionSideToggle').value = side;
 
             modal.classList.add('visible');
             statusEl.textContent = 'Loading panorama...';
