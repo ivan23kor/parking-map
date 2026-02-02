@@ -256,7 +256,7 @@
         <select id="uiSelect" onchange="if(this.value) window.location.href=this.value">
             <option value="../ui-panorama/">🔭 Panorama</option>
             <option value="../ui-map/" selected>📍 Map</option>
-            <option value="../ui-upload/out/">📤 Upload</option>
+            <option value="../ui-upload/">📤 Upload</option>
         </select>
     </div>
 
@@ -310,6 +310,7 @@
     <script src="../config.js"></script>
     <script src="../js/utils.js"></script>
     <script src="../js/streets.js"></script>
+    <script src="../js/panorama.js"></script>
     <script src="../js/streetview.js"></script>
     <script src="../js/detection.js"></script>
 
@@ -705,7 +706,7 @@
             if (!point || !panoId) return;
 
             const side = document.getElementById('sideToggle').value;
-            const heading = calculateDriverHeading(point.bearing, point.oneway, side);
+            const heading = calculateHeadingWithSide(point.bearing, side, point.oneway);
 
             // Store context for detection
             currentDetectionContext = { panoId, heading };

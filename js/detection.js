@@ -20,7 +20,7 @@ let panoChangeListener = null;
  * @param {number} height - Image height (default 640)
  * @returns {string} Street View Static API URL
  */
-function getStreetViewImageUrl(panoId, heading, pitch = -5, fov = 90, width = 640, height = 640) {
+function getStreetViewImageUrl(panoId, heading, pitch = 0, fov = 90, width = 640, height = 640) {
     const apiKey = window.GOOGLE_CONFIG?.API_KEY;
     if (!apiKey) {
         throw new Error('Google API key not configured');
@@ -252,16 +252,18 @@ function updateDetectionOverlay() {
  * @param {HTMLElement} container - Container element
  */
 function initDetectionPanorama(panoId, heading, container) {
+    const pov = getDefaultPov(heading);
+    
     if (detectionPanorama) {
         // Update existing panorama
         detectionPanorama.setPano(panoId);
-        detectionPanorama.setPov({ heading, pitch: -5, zoom: 1 });
+        detectionPanorama.setPov(pov);
     } else {
         // Create new panorama
         detectionPanorama = new google.maps.StreetViewPanorama(container, {
             pano: panoId,
-            pov: { heading, pitch: -5 },
-            zoom: 1,
+            pov,
+            zoom: PANORAMA_DEFAULTS.zoom,
             addressControl: false,
             showRoadLabels: false,
             motionTracking: false,
@@ -308,7 +310,7 @@ function clearDetections() {
  */
 async function runDetectionOnPanorama(panoId, heading, statusEl, useCurrentPov = false) {
     let fov = 90;  // Default FOV for detection
-    let pitch = -5;
+    let pitch = PANORAMA_DEFAULTS.pitch;
     let detectHeading = heading;
     let detectPanoId = panoId;
     

@@ -86,28 +86,42 @@
             z-index: 101;
         }
 
-        #backLink {
-            color: white;
-            text-decoration: none;
-            background: rgba(0,0,0,0.6);
-            padding: 10px 16px;
-            border-radius: 4px;
-            font-size: 14px;
+        #uiSwitcher {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            z-index: 2001;
         }
 
-        #backLink:hover {
-            background: rgba(0,0,0,0.8);
+        #uiSwitcher select {
+            padding: 10px 12px;
+            border-radius: 4px;
+            border: none;
+            font-size: 14px;
+            cursor: pointer;
+            background: rgba(255,255,255,0.9);
+        }
+
+        #uiSwitcher select:hover {
+            background: white;
         }
     </style>
 </head>
 <body>
+    <div id="uiSwitcher">
+        <select id="uiSelect" onchange="if(this.value) window.location.href=this.value">
+            <option value="../ui-panorama/" selected>🔭 Panorama</option>
+            <option value="../ui-map/">📍 Map</option>
+            <option value="../ui-upload/">📤 Upload</option>
+        </select>
+    </div>
+
     <div id="controls">
         <select id="sideToggle">
             <option value="right">Right side</option>
             <option value="left">Left side</option>
         </select>
         <button id="detectBtn">🔍 Detect</button>
-        <a id="backLink" href="../">↩ Back</a>
     </div>
 
     <div id="detectionPanorama"></div>
@@ -117,6 +131,7 @@
     <!-- Config and Modules -->
     <script src="../config.js"></script>
     <script src="../js/utils.js"></script>
+    <script src="../js/panorama.js"></script>
     <script src="../js/streetview.js"></script>
     <script src="../js/detection.js"></script>
 
@@ -139,9 +154,10 @@
     <script>
         // Calgary Tower location - 9 Ave & Centre St
         const INITIAL_LOCATION = { lat: 51.0447, lon: -114.0628 };
-        const INITIAL_HEADING = 90; // Facing east along 9 Ave
+        const BASE_HEADING = 90; // Facing east along 9 Ave
 
         let currentPanoId = null;
+        let currentBaseHeading = BASE_HEADING;
 
         /**
          * Initialize the application after Google Maps API loads.
@@ -170,9 +186,11 @@
 
                 currentPanoId = panoIds[0];
 
-                // Initialize panorama
+                // Initialize panorama with side offset
                 const container = document.getElementById('detectionPanorama');
-                initDetectionPanorama(currentPanoId, INITIAL_HEADING, container);
+                const side = document.getElementById('sideToggle').value;
+                const heading = calculateHeadingWithSide(BASE_HEADING, side);
+                initDetectionPanorama(currentPanoId, heading, container);
 
                 statusEl.textContent = 'Click "Detect" to scan for parking signs';
 
@@ -200,12 +218,11 @@
         // Event listeners
         document.getElementById('detectBtn').addEventListener('click', runDetect);
 
-        // Side toggle - adjust heading offset when changed
-        document.getElementById('sideToggle').addEventListener('change', () => {
-            // The side toggle affects the calculateDriverHeading function,
-            // but since the user can freely navigate in the panorama,
-            // changing the side is most useful before clicking Detect.
-            // No immediate action needed - detection uses current POV.
+        // Side toggle - adjust panorama heading when changed
+        document.getElementById('sideToggle').addEventListener('change', (e) => {
+            if (!currentPanoId) return;
+            const heading = calculateHeadingWithSide(currentBaseHeading, e.target.value);
+            initDetectionPanorama(currentPanoId, heading, document.getElementById('detectionPanorama'));
         });
     </script>
 </body>

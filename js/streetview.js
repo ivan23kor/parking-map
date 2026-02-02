@@ -138,34 +138,6 @@ async function fetchPanoIds(locations, session) {
 }
 
 /**
- * Calculate driver perspective heading.
- * @param {number} streetBearing - Street direction in degrees (-180 to 180)
- * @param {string|null} oneway - OSM oneway tag value
- * @param {string} side - 'right' or 'left'
- * @returns {number} Heading in degrees (0-360)
- */
-function calculateDriverHeading(streetBearing, oneway, side) {
-    let heading = streetBearing;
-
-    // Normalize to 0-360
-    heading = ((heading % 360) + 360) % 360;
-
-    // Handle one-way=-1 (way direction opposite to traffic)
-    if (oneway === '-1') {
-        heading = (heading + 180) % 360;
-    }
-
-    // Offset for viewing side
-    if (side === 'right') {
-        heading = (heading + 45) % 360;
-    } else {
-        heading = (heading - 45 + 360) % 360;
-    }
-
-    return heading;
-}
-
-/**
  * Open or update Street View panorama.
  * Reuses single instance for efficiency.
  * @param {string} panoId - Panorama ID
@@ -173,11 +145,15 @@ function calculateDriverHeading(streetBearing, oneway, side) {
  * @param {HTMLElement} containerEl - DOM element to render panorama in
  */
 function openPanorama(panoId, heading, containerEl) {
+    const pov = typeof getDefaultPov === 'function' 
+        ? getDefaultPov(heading) 
+        : { heading, pitch: 0, zoom: 1 };
+    
     if (!panoramaInstance) {
         panoramaInstance = new google.maps.StreetViewPanorama(containerEl, {
             pano: panoId,
-            pov: { heading, pitch: -5 },
-            zoom: 1,
+            pov,
+            zoom: pov.zoom,
             zoomControl: true,
             addressControl: true,
             showRoadLabels: true,
@@ -185,13 +161,13 @@ function openPanorama(panoId, heading, containerEl) {
             motionTrackingControl: false
         });
         // Allow zoom up to 8x
-        panoramaInstance.set('zoom', 1);
+        panoramaInstance.set('zoom', pov.zoom);
         if (panoramaInstance.setMaxZoom) {
             panoramaInstance.setMaxZoom(8);
         }
     } else {
         panoramaInstance.setPano(panoId);
-        panoramaInstance.setPov({ heading, pitch: -5 });
+        panoramaInstance.setPov(pov);
     }
 }
 

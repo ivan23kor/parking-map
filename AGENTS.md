@@ -61,13 +61,17 @@ Single-page app using modular JavaScript.
 
 **File structure:**
 ```
-index.html          # UI shell, map init, orchestration
 config.js           # Google API key + detection API config
 js/
 ├── utils.js        # Progress bar, error display
 ├── streets.js      # Overpass API, street sampling with turf.bearing()
+├── panorama.js     # Shared panorama config (pitch, zoom, heading offset)
 ├── streetview.js   # Session tokens, panoIds bulk fetch, panorama display
 └── detection.js    # YOLO detection API calls, bounding box rendering
+ui-map/
+└── index.html      # Map-based UI with area selection
+ui-panorama/
+└── index.html      # Single panorama UI (Calgary Tower demo)
 backend/
 ├── main.py         # FastAPI detection service
 └── requirements.txt
@@ -81,7 +85,7 @@ backend/
   - **Google Map Tiles API** (`https://tile.googleapis.com/v1/streetview/panoIds`) bulk-fetches panorama IDs (up to 100 per request).
   - **Google Maps JS API** (`StreetViewPanorama`) displays panoramas.
 - **Layers:** `streetsLayer`, `streetViewDotsLayer`, `selectionLayer` are Leaflet `LayerGroup`s; dots open a Street View panorama modal.
-- **Driver perspective:** Heading = street bearing ± 45° (right/left toggle), handles one-way streets via OSM `oneway` tag.
+- **Driver perspective:** Both UIs use `panorama.js` for consistent behavior. Heading = base direction ± 45° (right/left toggle via `calculateHeadingWithSide()`), handles one-way streets via OSM `oneway` tag. Default pitch = 0 (horizon).
 
 **Config coupling:**
 - `config.js` exports `window.GOOGLE_CONFIG.API_KEY` and `window.DETECTION_CONFIG`.
