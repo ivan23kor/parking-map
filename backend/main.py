@@ -19,6 +19,8 @@ from ultralytics import YOLO
 MODEL_PATH = Path(__file__).parent.parent / "notebooks/output/test_run/train/weights/best.pt"
 DETECTION_IMAGES_DIR = Path(__file__).parent.parent / "detection_images"
 DETECTION_IMAGES_DIR.mkdir(exist_ok=True)
+DETECTED_SIGNS_DIR = Path(__file__).parent.parent / "detected_signs"
+DETECTED_SIGNS_DIR.mkdir(exist_ok=True)
 
 # Load model at startup
 print(f"Loading model from: {MODEL_PATH}")
@@ -104,18 +106,26 @@ async def detect(request: DetectionRequest):
     results = model.predict(image, conf=request.confidence, verbose=False)
     inference_time_ms = (time.time() - start_time) * 1000
     
-    # Parse results
+    # Parse results and crop detected signs
     detections = []
     for r in results:
         if r.boxes is not None:
-            for box in r.boxes:
+            for i, box in enumerate(r.boxes):
                 cls_id = int(box.cls[0])
+                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                conf = float(box.conf[0])
+                
+                # Crop and save detected sign
+                crop = image.crop((x1, y1, x2, y2))
+                crop_filename = f"{timestamp}_{i:02d}_conf{conf:.2f}.jpg"
+                crop.save(DETECTED_SIGNS_DIR / crop_filename)
+                
                 detections.append(Detection(
-                    x1=float(box.xyxy[0][0]),
-                    y1=float(box.xyxy[0][1]),
-                    x2=float(box.xyxy[0][2]),
-                    y2=float(box.xyxy[0][3]),
-                    confidence=float(box.conf[0]),
+                    x1=float(x1),
+                    y1=float(y1),
+                    x2=float(x2),
+                    y2=float(y2),
+                    confidence=conf,
                     class_name=model.names[cls_id],
                 ))
     
