@@ -46,12 +46,10 @@ class DetectionRequest(BaseModel):
 
 class CropSignTilesRequest(BaseModel):
     pano_id: str
-    # Tiles to fetch (list of {x, y} at zoom level 5)
-    tiles: list[dict]
+    tiles: list[dict]  # Tiles to fetch (list of {x, y} at zoom level 5)
     tile_x1: int  # Origin tile x
     tile_y1: int  # Origin tile y
-    # Crop bounds within stitched tile image
-    crop_x: int
+    crop_x: int  # Crop bounds within stitched tile image
     crop_y: int
     crop_width: int
     crop_height: int
@@ -232,7 +230,11 @@ async def crop_sign_tiles(request: CropSignTilesRequest):
             try:
                 resp = await client.get(url, timeout=10.0)
                 resp.raise_for_status()
-                tile_images[(tile['x'], tile['y'])] = Image.open(io.BytesIO(resp.content))
+                tile_img = Image.open(io.BytesIO(resp.content))
+                # Resize if tile size doesn't match expected
+                if tile_img.size != (TILE_SIZE, TILE_SIZE):
+                    tile_img = tile_img.resize((TILE_SIZE, TILE_SIZE), Image.Resampling.LANCZOS)
+                tile_images[(tile['x'], tile['y'])] = tile_img
             except httpx.HTTPError as e:
                 raise HTTPException(status_code=400, detail=f"Failed to fetch tile {tile}: {e}")
     
@@ -245,19 +247,22 @@ async def crop_sign_tiles(request: CropSignTilesRequest):
     # Create stitched image
     stitched = Image.new('RGB', (stitch_width, stitch_height))
     for (tx, ty), tile_img in tile_images.items():
+        if tile_img.mode != 'RGB':
+            tile_img = tile_img.convert('RGB')
         paste_x = (tx - request.tile_x1) * TILE_SIZE
         paste_y = (ty - request.tile_y1) * TILE_SIZE
         stitched.paste(tile_img, (paste_x, paste_y))
     
-    # Crop the sign region
+    # Calculate crop bounds (clamped to image)
     x1 = max(0, request.crop_x)
     y1 = max(0, request.crop_y)
     x2 = min(stitch_width, request.crop_x + request.crop_width)
     y2 = min(stitch_height, request.crop_y + request.crop_height)
     
+    # Crop the sign region
     cropped = stitched.crop((x1, y1, x2, y2))
     
-    # Save
+    # Save cropped image
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{timestamp}_conf{request.confidence:.2f}.jpg"
     cropped.save(DETECTED_SIGNS_DIR / filename, quality=95)
