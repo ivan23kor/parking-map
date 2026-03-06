@@ -25,6 +25,7 @@ const TILE_SIZE = 512;  // Street View tile size in pixels
 const MAX_ZOOM = 5;     // Maximum zoom level for Street View tiles
 const TILE_GRID_WIDTH = 32 * TILE_SIZE;   // 16384
 const TILE_GRID_HEIGHT = 16 * TILE_SIZE;  // 8192
+const CROP_PADDING = 1.4; // 20% extra on each side of the detected sign
 
 /**
  * Convert heading/pitch to pixel coordinates in the full panorama tile image.
@@ -479,12 +480,13 @@ async function collectMarkData(screenX, screenY) {
     const container = document.getElementById('detectionPanorama');
     const screenWidth = container.clientWidth;
     const screenHeight = container.clientHeight;
-
+    
     const pov = detectionPanorama.getPov();
     const currentFov = zoomToFov(pov.zoom || 1);
     const panoId = detectionPanorama.getPano();
+    
     const angular = screenToAngular(screenX, screenY, pov.heading, pov.pitch, currentFov, screenWidth, screenHeight);
-
+    
     // Get panorama metadata (cache it)
     if (!cachedPanoMetadata || cachedPanoMetadata.panoId !== panoId) {
         try {
@@ -499,13 +501,14 @@ async function collectMarkData(screenX, screenY) {
     
     const panoHeading = cachedPanoMetadata.heading || 0;
     const tilt = cachedPanoMetadata.tilt ?? 90;
+    
     const uncorrected = headingPitchToPixel(angular.heading, angular.pitch, TILE_GRID_WIDTH, TILE_GRID_HEIGHT, panoHeading);
     const corrected = headingPitchToPixelCorrected(angular.heading, angular.pitch, TILE_GRID_WIDTH, TILE_GRID_HEIGHT, panoHeading, tilt);
-
+    
     let relH = angular.heading - panoHeading;
     if (relH < -180) relH += 360;
     if (relH > 180) relH -= 360;
-
+    
     return {
         panoId, panoHeading, tilt,
         heading: angular.heading,
@@ -521,52 +524,55 @@ async function collectMarkData(screenX, screenY) {
  * Handle Ctrl key press for paired marking.
  * 
  * Workflow:
- *   1st Ctrl - mark the ACTUAL sign center (green crosshair)
- *   2nd Ctrl - mark the BOUNDING BOX center (red crosshair)
- *   -> logs the pair with errors, then resets for next pair
+ *   1st Ctrl — mark the ACTUAL sign center (green crosshair)
+ *   2nd Ctrl — mark the BOUNDING BOX center (red crosshair)
+ *   → logs the pair with errors, then resets for next pair
  *
  * Escape clears everything.
  */
 async function handleSignMarking(event) {
     if (event.key !== 'Control' || event.repeat || !detectionPanorama) return;
-
+    
     const container = document.getElementById('detectionPanorama');
     const screenX = lastMouseX;
     const screenY = lastMouseY;
-
+    
     if (screenX < 0 || screenX > container.clientWidth || screenY < 0 || screenY > container.clientHeight) {
         console.log('Mouse is outside panorama area');
         return;
     }
-
+    
     const data = await collectMarkData(screenX, screenY);
     const statusEl = document.getElementById('status') || document.getElementById('detectionStatus');
     const pairNum = markedPairs.length + 1;
-
+    
     if (!pendingSignMark) {
+        // --- First Ctrl: mark the actual sign location (ground truth) ---
         pendingSignMark = data;
         addMarkerToOverlay(screenX, screenY, `${pairNum}S`, '#00ff00');
-
+        
         console.log(
             `SIGN #${pairNum}: h=${data.heading.toFixed(2)}° p=${data.pitch.toFixed(2)}° relH=${data.relH.toFixed(2)}°\n` +
             `  tile uncorr=(${data.tileUncorrected.x.toFixed(0)}, ${data.tileUncorrected.y.toFixed(0)}) ` +
             `corr=(${data.tileCorrected.x.toFixed(0)}, ${data.tileCorrected.y.toFixed(0)}) yCorr=${data.yCorrection.toFixed(1)}px`
         );
-
+        
         if (statusEl) {
-            statusEl.textContent = `Pair #${pairNum}: sign marked at h=${data.heading.toFixed(1)}° p=${data.pitch.toFixed(1)}° - now Ctrl+hover on the bounding box`;
+            statusEl.textContent = `Pair #${pairNum}: sign marked at h=${data.heading.toFixed(1)}° p=${data.pitch.toFixed(1)}° — now Ctrl+hover on the bounding box`;
         }
     } else {
+        // --- Second Ctrl: mark the bounding box location ---
         addMarkerToOverlay(screenX, screenY, `${pairNum}B`, '#ff4444');
-
+        
         const sign = pendingSignMark;
         const box = data;
-
+        
+        // Compute errors
         let hErr = box.heading - sign.heading;
         if (hErr > 180) hErr -= 360;
         if (hErr < -180) hErr += 360;
         const pErr = box.pitch - sign.pitch;
-
+        
         const pair = {
             num: pairNum,
             sign,
@@ -579,14 +585,15 @@ async function handleSignMarking(event) {
             }
         };
         markedPairs.push(pair);
-
+        
         console.log(
             `BOX  #${pairNum}: h=${box.heading.toFixed(2)}° p=${box.pitch.toFixed(2)}°\n` +
             `  tile uncorr=(${box.tileUncorrected.x.toFixed(0)}, ${box.tileUncorrected.y.toFixed(0)}) ` +
             `corr=(${box.tileCorrected.x.toFixed(0)}, ${box.tileCorrected.y.toFixed(0)}) yCorr=${box.yCorrection.toFixed(1)}px\n` +
             `PAIR #${pairNum} ERROR: Δheading=${hErr.toFixed(2)}° Δpitch=${pErr.toFixed(2)}° Δtile=(${pair.errors.tileX.toFixed(0)}, ${pair.errors.tileY.toFixed(0)})px`
         );
-
+        
+        // Summary table if we have multiple pairs
         if (markedPairs.length > 1) {
             const avgH = markedPairs.reduce((s, p) => s + p.errors.heading, 0) / markedPairs.length;
             const avgP = markedPairs.reduce((s, p) => s + p.errors.pitch, 0) / markedPairs.length;
@@ -594,11 +601,12 @@ async function handleSignMarking(event) {
                 `SUMMARY (${markedPairs.length} pairs): avg Δheading=${avgH.toFixed(2)}° avg Δpitch=${avgP.toFixed(2)}°`
             );
         }
-
+        
         if (statusEl) {
-            statusEl.textContent = `Pair #${pairNum}: Δh=${hErr.toFixed(2)}° Δp=${pErr.toFixed(2)}° - Ctrl to start next pair, Esc to clear`;
+            statusEl.textContent = `Pair #${pairNum}: Δh=${hErr.toFixed(2)}° Δp=${pErr.toFixed(2)}° — Ctrl to start next pair, Esc to clear`;
         }
-
+        
+        // Reset for next pair
         pendingSignMark = null;
     }
 }
@@ -609,10 +617,10 @@ async function handleSignMarking(event) {
 function addMarkerToOverlay(screenX, screenY, label, color = '#00ff00') {
     const overlay = document.getElementById('detectionOverlay');
     if (!overlay) return;
-
+    
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     g.classList.add('sign-marker');
-
+    
     const size = 12;
     const line1 = document.createElementNS('http://www.w3.org/2000/svg', 'line');
     line1.setAttribute('x1', screenX - size);
@@ -629,7 +637,7 @@ function addMarkerToOverlay(screenX, screenY, label, color = '#00ff00') {
     line2.setAttribute('y2', screenY + size);
     line2.setAttribute('stroke', color);
     line2.setAttribute('stroke-width', '2');
-
+    
     const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
     text.setAttribute('x', screenX + size + 4);
     text.setAttribute('y', screenY - size);
@@ -713,8 +721,18 @@ function updateDetectionOverlay() {
         rect.addEventListener('click', async (e) => {
             e.stopPropagation();
             e.preventDefault();
-            
-            cropAndSaveSign(det);
+
+            const containerRect = container.getBoundingClientRect();
+            const clickX = e.clientX - containerRect.left;
+            const clickY = e.clientY - containerRect.top;
+            const clickAngular = screenToAngular(clickX, clickY, pov.heading, pov.pitch, fov, width, height);
+
+            cropAndSaveSign(det, {
+                heading: clickAngular.heading,
+                pitch: clickAngular.pitch,
+                screenX: clickX,
+                screenY: clickY
+            });
         });
         rect.addEventListener('mousedown', (e) => e.stopPropagation());
         rect.addEventListener('mouseup', (e) => e.stopPropagation());
@@ -951,7 +969,7 @@ async function runDetectionOnPanorama(panoId, heading, statusEl, useCurrentPov =
 /**
  * Crop and save sign using high-resolution tiles.
  */
-async function cropAndSaveSign(det) {
+async function cropAndSaveSign(det, cropCenterOverride = null) {
     const statusEl = document.getElementById('status') || document.getElementById('detectionStatus');
     const apiUrl = window.DETECTION_CONFIG?.API_URL;
     
@@ -977,25 +995,44 @@ async function cropAndSaveSign(det) {
         const panoHeading = metadata.heading || 0;
         const tilt = metadata.tilt ?? 90;
         
-        // Compute both uncorrected and corrected coordinates for comparison
-        const uncorrected = headingPitchToPixel(det.heading, det.pitch, imageWidth, imageHeight, panoHeading);
-        const corrected = headingPitchToPixelCorrected(det.heading, det.pitch, imageWidth, imageHeight, panoHeading, tilt);
+        const cropHeading = cropCenterOverride?.heading ?? det.heading;
+        const cropPitch = cropCenterOverride?.pitch ?? det.pitch;
+        const uncorrected = headingPitchToPixel(cropHeading, cropPitch, imageWidth, imageHeight, panoHeading);
+        const corrected = headingPitchToPixelCorrected(cropHeading, cropPitch, imageWidth, imageHeight, panoHeading, tilt);
         const signSize = angularToPixelSize(det.angularWidth, det.angularHeight, imageWidth, imageHeight);
         
-        // Calculate relative heading for context
-        let relH = det.heading - panoHeading;
-        if (relH < -180) relH += 360;
-        if (relH > 180) relH -= 360;
-        
-        console.log(
-            `CROP DEBUG: pano=${panoId} panoH=${panoHeading.toFixed(1)}° tilt=${(metadata.tilt ?? 90).toFixed(2)}°\n` +
-            `  detection: h=${det.heading.toFixed(2)}° p=${det.pitch.toFixed(2)}° relH=${relH.toFixed(2)}° size=${det.angularWidth.toFixed(2)}°x${det.angularHeight.toFixed(2)}°\n` +
-            `  uncorrected: (${uncorrected.x.toFixed(0)}, ${uncorrected.y.toFixed(0)}) corrected: (${corrected.x.toFixed(0)}, ${corrected.y.toFixed(0)}) yCorr=${corrected.yCorrection.toFixed(1)}px size=${signSize.width.toFixed(0)}x${signSize.height.toFixed(0)}`
-        );
+        let detectionRelH = det.heading - panoHeading;
+        if (detectionRelH < -180) detectionRelH += 360;
+        if (detectionRelH > 180) detectionRelH -= 360;
+
+        let cropRelH = cropHeading - panoHeading;
+        if (cropRelH < -180) cropRelH += 360;
+        if (cropRelH > 180) cropRelH -= 360;
         
         // Use corrected coordinates with 1.2x padding
         const { tiles, tileX1, tileY1, cropBounds } = getTilesForRegion(
-            corrected.x, corrected.y, signSize.width, signSize.height, 1.2
+            corrected.x, corrected.y, signSize.width, signSize.height, CROP_PADDING
+        );
+        
+        // Current panorama viewer state
+        const pov = detectionPanorama.getPov();
+        const viewerFov = zoomToFov(pov.zoom || 1);
+        
+        console.log(
+            `=== CROP PIPELINE ===\n` +
+            `PANO: id=${panoId} heading=${panoHeading.toFixed(2)}° tilt=${tilt.toFixed(4)}°\n` +
+            `VIEWER: heading=${pov.heading.toFixed(2)}° pitch=${pov.pitch.toFixed(2)}° zoom=${(pov.zoom||1).toFixed(2)} fov=${viewerFov.toFixed(1)}°\n` +
+            `DETECTION angular: heading=${det.heading.toFixed(2)}° pitch=${det.pitch.toFixed(2)}° relH=${detectionRelH.toFixed(2)}° size=${det.angularWidth.toFixed(3)}°×${det.angularHeight.toFixed(3)}° conf=${det.confidence.toFixed(2)}\n` +
+            `CROP center source: ${cropCenterOverride ? `click @ (${cropCenterOverride.screenX.toFixed(1)}, ${cropCenterOverride.screenY.toFixed(1)})` : 'detection center'}\n` +
+            `CROP angular: heading=${cropHeading.toFixed(2)}° pitch=${cropPitch.toFixed(2)}° relH=${cropRelH.toFixed(2)}°\n` +
+            `TILE GRID: ${imageWidth}×${imageHeight} (zoom 5, ${TILE_SIZE}px tiles)\n` +
+            `PIXEL uncorrected: (${uncorrected.x.toFixed(1)}, ${uncorrected.y.toFixed(1)})\n` +
+            `PIXEL corrected:   (${corrected.x.toFixed(1)}, ${corrected.y.toFixed(1)}) yCorrection=${corrected.yCorrection.toFixed(1)}px\n` +
+            `PIXEL sign size:   ${signSize.width.toFixed(0)}×${signSize.height.toFixed(0)} (with ${CROP_PADDING.toFixed(1)}x padding: ${Math.round(signSize.width*CROP_PADDING)}×${Math.round(signSize.height*CROP_PADDING)})\n` +
+            `TILES: origin=(${tileX1},${tileY1}) fetching=${JSON.stringify(tiles)}\n` +
+            `CROP in stitched: x=${cropBounds.x} y=${cropBounds.y} w=${cropBounds.width} h=${cropBounds.height}\n` +
+            `CROP center in tile grid: (${(tileX1*TILE_SIZE + cropBounds.x + cropBounds.width/2).toFixed(0)}, ${(tileY1*TILE_SIZE + cropBounds.y + cropBounds.height/2).toFixed(0)})\n` +
+            `===================`
         );
         
         const resp = await fetch(`${apiUrl}/crop-sign-tiles`, {
@@ -1012,7 +1049,8 @@ async function cropAndSaveSign(det) {
                 crop_height: cropBounds.height,
                 confidence: det.confidence,
                 api_key: window.GOOGLE_CONFIG?.API_KEY,
-                session_token: session
+                session_token: session,
+                debug: true
             })
         });
         
