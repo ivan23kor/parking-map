@@ -434,9 +434,12 @@ function screenToAngular(screenX, screenY, povHeading, povPitch, fov, screenWidt
     };
 }
 
-// Store marked ground truth points for offset analysis
-let markedPoints = [];
+// Paired marking state: alternates between marking sign (ground truth) and detection box
+let markedPairs = [];        // Completed pairs: [{sign: {...}, box: {...}, errors: {...}}]
+let pendingSignMark = null;  // Waiting for box mark to complete the pair
 let cachedPanoMetadata = null;
+// Legacy alias for cleanup code
+let markedPoints = [];
 
 /**
  * Convert heading/pitch to tile pixel coordinates with tilt correction.
@@ -469,33 +472,19 @@ function headingPitchToPixelCorrected(heading, pitch, imageWidth, imageHeight, p
 }
 
 /**
- * Handle Ctrl key press to mark mouse position for coordinate data collection.
- * Hover mouse over a sign center, then press Ctrl to mark it.
- * Shows visual marker and logs data for offset analysis.
+ * Collect angular + tile data for a screen position.
+ * Shared helper for both sign and box marking.
  */
-async function handleSignMarking(event) {
-    // Only trigger on Ctrl key press (not release, not with other keys)
-    if (event.key !== 'Control' || event.repeat || !detectionPanorama) return;
-    
+async function collectMarkData(screenX, screenY) {
     const container = document.getElementById('detectionPanorama');
     const screenWidth = container.clientWidth;
     const screenHeight = container.clientHeight;
-    
-    const screenX = lastMouseX;
-    const screenY = lastMouseY;
-    
-    if (screenX < 0 || screenX > screenWidth || screenY < 0 || screenY > screenHeight) {
-        console.log('Mouse is outside panorama area');
-        return;
-    }
-    
+
     const pov = detectionPanorama.getPov();
     const currentFov = zoomToFov(pov.zoom || 1);
     const panoId = detectionPanorama.getPano();
-    
-    // Convert screen position to angular coordinates
     const angular = screenToAngular(screenX, screenY, pov.heading, pov.pitch, currentFov, screenWidth, screenHeight);
-    
+
     // Get panorama metadata (cache it)
     if (!cachedPanoMetadata || cachedPanoMetadata.panoId !== panoId) {
         try {
@@ -510,72 +499,127 @@ async function handleSignMarking(event) {
     
     const panoHeading = cachedPanoMetadata.heading || 0;
     const tilt = cachedPanoMetadata.tilt ?? 90;
-    const roll = cachedPanoMetadata.roll ?? 0;
-    
-    // Compute both uncorrected and corrected pixel positions
     const uncorrected = headingPitchToPixel(angular.heading, angular.pitch, TILE_GRID_WIDTH, TILE_GRID_HEIGHT, panoHeading);
     const corrected = headingPitchToPixelCorrected(angular.heading, angular.pitch, TILE_GRID_WIDTH, TILE_GRID_HEIGHT, panoHeading, tilt);
-    
-    // Calculate relative heading for analysis
+
     let relH = angular.heading - panoHeading;
     if (relH < -180) relH += 360;
     if (relH > 180) relH -= 360;
-    
-    // Store marked point
-    const markedPoint = {
-        panoId,
-        panoHeading,
-        tilt,
-        roll,
+
+    return {
+        panoId, panoHeading, tilt,
         heading: angular.heading,
         pitch: angular.pitch,
-        relH,
-        screenX,
-        screenY,
-        uncorrectedX: uncorrected.x,
-        uncorrectedY: uncorrected.y,
-        correctedX: corrected.x,
-        correctedY: corrected.y,
-        yCorrection: corrected.yCorrection,
-        timestamp: Date.now()
+        relH, screenX, screenY,
+        tileUncorrected: { x: uncorrected.x, y: uncorrected.y },
+        tileCorrected: { x: corrected.x, y: corrected.y },
+        yCorrection: corrected.yCorrection
     };
-    markedPoints.push(markedPoint);
-    
-    // Add visual marker on overlay
-    addMarkerToOverlay(screenX, screenY, markedPoints.length);
-    
-    console.log(
-        `MARK #${markedPoints.length}: h=${angular.heading.toFixed(2)}° p=${angular.pitch.toFixed(2)}° relH=${relH.toFixed(2)}° tilt=${tilt.toFixed(2)}°\n` +
-        `  uncorrected: (${uncorrected.x.toFixed(0)}, ${uncorrected.y.toFixed(0)}) corrected: (${corrected.x.toFixed(0)}, ${corrected.y.toFixed(0)}) yCorr=${corrected.yCorrection.toFixed(1)}px`
-    );
-    
-    // Update status
+}
+
+/**
+ * Handle Ctrl key press for paired marking.
+ * 
+ * Workflow:
+ *   1st Ctrl - mark the ACTUAL sign center (green crosshair)
+ *   2nd Ctrl - mark the BOUNDING BOX center (red crosshair)
+ *   -> logs the pair with errors, then resets for next pair
+ *
+ * Escape clears everything.
+ */
+async function handleSignMarking(event) {
+    if (event.key !== 'Control' || event.repeat || !detectionPanorama) return;
+
+    const container = document.getElementById('detectionPanorama');
+    const screenX = lastMouseX;
+    const screenY = lastMouseY;
+
+    if (screenX < 0 || screenX > container.clientWidth || screenY < 0 || screenY > container.clientHeight) {
+        console.log('Mouse is outside panorama area');
+        return;
+    }
+
+    const data = await collectMarkData(screenX, screenY);
     const statusEl = document.getElementById('status') || document.getElementById('detectionStatus');
-    if (statusEl) {
-        statusEl.textContent = `Marked point #${markedPoints.length} at h=${angular.heading.toFixed(1)}° p=${angular.pitch.toFixed(1)}° (correction: ${corrected.yCorrection.toFixed(0)}px)`;
+    const pairNum = markedPairs.length + 1;
+
+    if (!pendingSignMark) {
+        pendingSignMark = data;
+        addMarkerToOverlay(screenX, screenY, `${pairNum}S`, '#00ff00');
+
+        console.log(
+            `SIGN #${pairNum}: h=${data.heading.toFixed(2)}° p=${data.pitch.toFixed(2)}° relH=${data.relH.toFixed(2)}°\n` +
+            `  tile uncorr=(${data.tileUncorrected.x.toFixed(0)}, ${data.tileUncorrected.y.toFixed(0)}) ` +
+            `corr=(${data.tileCorrected.x.toFixed(0)}, ${data.tileCorrected.y.toFixed(0)}) yCorr=${data.yCorrection.toFixed(1)}px`
+        );
+
+        if (statusEl) {
+            statusEl.textContent = `Pair #${pairNum}: sign marked at h=${data.heading.toFixed(1)}° p=${data.pitch.toFixed(1)}° - now Ctrl+hover on the bounding box`;
+        }
+    } else {
+        addMarkerToOverlay(screenX, screenY, `${pairNum}B`, '#ff4444');
+
+        const sign = pendingSignMark;
+        const box = data;
+
+        let hErr = box.heading - sign.heading;
+        if (hErr > 180) hErr -= 360;
+        if (hErr < -180) hErr += 360;
+        const pErr = box.pitch - sign.pitch;
+
+        const pair = {
+            num: pairNum,
+            sign,
+            box,
+            errors: {
+                heading: hErr,
+                pitch: pErr,
+                tileX: box.tileCorrected.x - sign.tileCorrected.x,
+                tileY: box.tileCorrected.y - sign.tileCorrected.y
+            }
+        };
+        markedPairs.push(pair);
+
+        console.log(
+            `BOX  #${pairNum}: h=${box.heading.toFixed(2)}° p=${box.pitch.toFixed(2)}°\n` +
+            `  tile uncorr=(${box.tileUncorrected.x.toFixed(0)}, ${box.tileUncorrected.y.toFixed(0)}) ` +
+            `corr=(${box.tileCorrected.x.toFixed(0)}, ${box.tileCorrected.y.toFixed(0)}) yCorr=${box.yCorrection.toFixed(1)}px\n` +
+            `PAIR #${pairNum} ERROR: Δheading=${hErr.toFixed(2)}° Δpitch=${pErr.toFixed(2)}° Δtile=(${pair.errors.tileX.toFixed(0)}, ${pair.errors.tileY.toFixed(0)})px`
+        );
+
+        if (markedPairs.length > 1) {
+            const avgH = markedPairs.reduce((s, p) => s + p.errors.heading, 0) / markedPairs.length;
+            const avgP = markedPairs.reduce((s, p) => s + p.errors.pitch, 0) / markedPairs.length;
+            console.log(
+                `SUMMARY (${markedPairs.length} pairs): avg Δheading=${avgH.toFixed(2)}° avg Δpitch=${avgP.toFixed(2)}°`
+            );
+        }
+
+        if (statusEl) {
+            statusEl.textContent = `Pair #${pairNum}: Δh=${hErr.toFixed(2)}° Δp=${pErr.toFixed(2)}° - Ctrl to start next pair, Esc to clear`;
+        }
+
+        pendingSignMark = null;
     }
 }
 
 /**
  * Add visual marker to the detection overlay.
  */
-function addMarkerToOverlay(screenX, screenY, number) {
+function addMarkerToOverlay(screenX, screenY, label, color = '#00ff00') {
     const overlay = document.getElementById('detectionOverlay');
     if (!overlay) return;
-    
-    // Create marker group
+
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     g.classList.add('sign-marker');
-    g.setAttribute('data-marker-num', number);
-    
-    // Crosshair
+
     const size = 12;
     const line1 = document.createElementNS('http://www.w3.org/2000/svg', 'line');
     line1.setAttribute('x1', screenX - size);
     line1.setAttribute('y1', screenY);
     line1.setAttribute('x2', screenX + size);
     line1.setAttribute('y2', screenY);
-    line1.setAttribute('stroke', '#00ff00');
+    line1.setAttribute('stroke', color);
     line1.setAttribute('stroke-width', '2');
     
     const line2 = document.createElementNS('http://www.w3.org/2000/svg', 'line');
@@ -583,17 +627,16 @@ function addMarkerToOverlay(screenX, screenY, number) {
     line2.setAttribute('y1', screenY - size);
     line2.setAttribute('x2', screenX);
     line2.setAttribute('y2', screenY + size);
-    line2.setAttribute('stroke', '#00ff00');
+    line2.setAttribute('stroke', color);
     line2.setAttribute('stroke-width', '2');
-    
-    // Number label
+
     const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
     text.setAttribute('x', screenX + size + 4);
     text.setAttribute('y', screenY - size);
-    text.setAttribute('fill', '#00ff00');
+    text.setAttribute('fill', color);
     text.setAttribute('font-size', '14');
     text.setAttribute('font-weight', 'bold');
-    text.textContent = `#${number}`;
+    text.textContent = label;
     
     g.appendChild(line1);
     g.appendChild(line2);
@@ -605,13 +648,15 @@ function addMarkerToOverlay(screenX, screenY, number) {
  * Clear all marked points and visual markers.
  */
 function clearMarkedPoints() {
+    markedPairs = [];
+    pendingSignMark = null;
     markedPoints = [];
     cachedPanoMetadata = null;
     const overlay = document.getElementById('detectionOverlay');
     if (overlay) {
         overlay.querySelectorAll('.sign-marker').forEach(el => el.remove());
     }
-    console.log('Cleared all marked points');
+    console.log('Cleared all marked pairs');
 }
 
 /**
