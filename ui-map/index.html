@@ -293,6 +293,10 @@
                 <option value="right">Right side</option>
                 <option value="left">Left side</option>
             </select>
+            <select id="detectMode">
+                <option value="standard">Standard</option>
+                <option value="sahi" selected>SAHI</option>
+            </select>
             <button id="redetectBtn">🔍 Detect</button>
             <button id="closeDetection">✕ Close</button>
         </div>
@@ -741,10 +745,11 @@
 
             const { panoId } = currentDetectionContext;
             const statusEl = document.getElementById('detectionStatus');
+            const useSahi = document.getElementById('detectMode').value === 'sahi';
 
             try {
                 // Use current POV (heading, pitch, zoom/FOV) for detection
-                await runDetectionOnPanorama(panoId, null, statusEl, true);
+                await runDetectionOnPanorama(panoId, null, statusEl, true, useSahi);
             } catch (err) {
                 console.error('Re-detection failed:', err);
                 statusEl.textContent = 'Detection failed.';
