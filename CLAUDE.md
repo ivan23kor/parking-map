@@ -1,57 +1,60 @@
 # AGENTS.md
 
-This file provides guidance to WARP (warp.dev) when working with code in this repository.
+This file provides guidance when working with code in this repository.
 
 ## Repo at a glance
-This repo mixes two related pieces:
-- **Map + street imagery viewer (static web app):** `index.html` (Leaflet + Turf + Google Maps JS API) with modular JS in `js/` and config in `config.js`.
-- **Parking-sign ML training:** dataset build script (`datasets/build_unified_dataset.py`), and Kaggle training notebooks under `notebooks/`.
+Three main parts:
+1. **Static map/panorama viewers** (`index.html`, `ui-map/`, `ui-panorama/`): Leaflet + Turf + Google Maps JS API with modular JS in `js/`
+2. **Next.js upload UI** (`ui-upload/`): shadcn/ui component library for uploading/detecting parking signs
+3. **Parking-sign ML backend** (`backend/`): FastAPI YOLO11 detection service + training pipeline (`datasets/`, `notebooks/`)
 
 ## Common commands
-### Run the map app locally
-The app is just static files; `npm` is only used as a command wrapper.
-
-- Serve the repo root on `http://localhost:8080`:
+### Run static app locally
+- Serve repo root on `http://localhost:8080` (injects `GOOGLE_MAPS_API_KEY` from env):
   ```bash
   npm run serve
+  # or
+  node serve.js
   ```
 
-- (Equivalent) Serve without npm:
+- Serve Python version:
   ```bash
-  python3 -m http.server 8080
+  python3 serve.py
   ```
 
-### Build / serve the `dist/` folder
-- Build (currently copies HTML into `dist/`):
-  ```bash
-  npm run build
-  ```
+### Build Next.js upload UI
+```bash
+npm run build    # Builds ui-upload/ to ui-upload/out/
+```
 
-- Serve `dist/` on `http://localhost:8081`:
-  ```bash
-  npm run serve:dist
-  ```
+### Build ML training dataset
+```bash
+python3 datasets/build_unified_dataset.py
+```
+Expects source datasets under `datasets/` (gitignored, local-only). Writes to `datasets/parking-sign-detection-coco-dataset/`.
 
-Note: `dist/` is gitignored (see `.gitignore`).
+### Run detection backend
+```bash
+# With uv (preferred):
+uv venv && uv pip install --python .venv/bin/python -r backend/requirements.txt
+.venv/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
 
-### Build the unified training dataset (YOLO format)
-- Build the combined dataset (writes into `datasets/parking-sign-detection-coco-dataset/`):
-  ```bash
-  python3 datasets/build_unified_dataset.py
-  ```
-
-This script expects the source datasets to exist under `datasets/` (which is gitignored and typically local-only).
+# Or with venv/pip:
+python3 -m venv .venv
+.venv/bin/pip install -r backend/requirements.txt
+.venv/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+```
 
 ### Train on Kaggle
-1. Upload dataset to kaggle.com/datasets
+1. Upload `datasets/parking-sign-detection-coco-dataset/` to kaggle.com/datasets
 2. Import notebook from `notebooks/`
 3. Enable GPU, run
 
-See `notebooks/KAGGLE_RUN_CHECKLIST.md` for details.
+See `notebooks/EXPERIMENT_7_README.md` for latest experiment details.
 
 ## Architecture (big picture)
-### 1) Web app (`index.html` + `js/`)
-Single-page app using modular JavaScript.
+### 1) Static web app (`index.html`, `ui-map/`, `ui-panorama/`)
+Modular vanilla JS apps.
 
 **File structure:**
 ```
@@ -66,52 +69,55 @@ ui-map/
 └── index.html      # Map-based UI with area selection
 ui-panorama/
 └── index.html      # Single panorama UI (Calgary Tower demo)
-backend/
-├── main.py         # FastAPI detection service
-└── requirements.txt
 ```
 
 **Key pieces:**
-- **Map rendering:** Leaflet map + OpenStreetMap tiles.
-- **Selection workflow:** user draws a rectangle (button or Ctrl/⌘ drag) → bounds trigger street fetch + Street View coverage check.
+- **Map rendering:** Leaflet + OpenStreetMap tiles
+- **Selection workflow:** draw rectangle (button or Ctrl/⌘ drag) → fetch streets → check Street View coverage
 - **External APIs:**
-  - **Overpass API** (`https://overpass-api.de/api/interpreter`) fetches OSM streets in bbox.
-  - **Google Map Tiles API** (`https://tile.googleapis.com/v1/streetview/panoIds`) bulk-fetches panorama IDs (up to 100 per request).
-  - **Google Maps JS API** (`StreetViewPanorama`) displays panoramas.
-- **Layers:** `streetsLayer`, `streetViewDotsLayer`, `selectionLayer` are Leaflet `LayerGroup`s; dots open a Street View panorama modal.
-- **Driver perspective:** Both UIs use `panorama.js` for consistent behavior. Heading = base direction ± 45° (right/left toggle via `calculateHeadingWithSide()`), handles one-way streets via OSM `oneway` tag. Default pitch = 0 (horizon).
+  - Overpass API (`https://overpass-api.de/api/interpreter`) — OSM streets in bbox
+  - Google Map Tiles API (`https://tile.googleapis.com/v1/streetview/panoIds`) — bulk panoId fetch (100 per request)
+  - Google Maps JS API (`StreetViewPanorama`) — panorama display
+- **Layers:** `streetsLayer`, `streetViewDotsLayer`, `selectionLayer` (Leaflet LayerGroups)
+- **Driver perspective:** `panorama.js` shared config. Heading = base direction ± 45° (right/left via `calculateHeadingWithSide()`), handles OSM `oneway` tag. Default pitch = 0.
 
 **Config coupling:**
-- `config.js` exports `window.GOOGLE_CONFIG.API_KEY` and `window.DETECTION_CONFIG`.
-- Session tokens cached in `localStorage` (~13 days).
+- `config.js` exports `window.GOOGLE_CONFIG.API_KEY` and `window.DETECTION_CONFIG`
+- Session tokens cached in `localStorage` (~13 days)
 
-### 2) Detection backend (`backend/`)
-FastAPI service that runs YOLO11 inference on Street View images.
+### 2) Next.js upload UI (`ui-upload/`)
+shadcn/ui component library for uploading/detecting parking signs.
 
-**Start the detection server:**
+**Build/run:**
 ```bash
-# Install dependencies (first time)
-uv venv && uv pip install --python .venv/bin/python -r backend/requirements.txt
-
-# Run server on port 8000
-.venv/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+cd ui-upload && bun install && bun run build
 ```
+
+### 3) Detection backend (`backend/`)
+FastAPI service running YOLO11 inference on Street View images.
 
 **API endpoints:**
 - `GET /health` — Health check
 - `POST /detect` — Run detection on image URL
   - Request: `{"image_url": "...", "confidence": 0.15}`
   - Response: `{"detections": [{"x1", "y1", "x2", "y2", "confidence", "class_name"}], "inference_time_ms": ...}`
+- `POST /detect-sahi` — Slicing Aided Hyper Inference (overlapping higher-zoom windows)
+- `POST /crop-sign-tiles` — Fetch/stitch/crop Street View tiles at max zoom
+- `POST /preview-sign` — Fetch sign-centered Street View at tight FOV
+- `GET /detect-debug` — Return image with bounding boxes drawn
 
-**Model:** Download from Kaggle after training → place in `backend/models/best.pt` (YOLO11m, 1 class: `parking_sign`)
+**Model:** Download from Kaggle → `backend/models/best.pt` (YOLO11m, 1 class: `parking_sign`)
 
-### 3) ML / training workflow (`datasets/`, `notebooks/`)
+**Detected signs:** Saved to `detected_signs/`, served at `/detected-signs/`
+
+### 4) ML/training (`datasets/`, `notebooks/`)
 Data flow:
-- Raw datasets under `datasets/` → `datasets/build_unified_dataset.py` converts/resizes into a **single-class** YOLO dataset (512x512) and writes `data.yaml`.
-- Training runs on Kaggle using notebooks in `notebooks/`. See `notebooks/EXPERIMENT_STATUS.md` for experiment results.
+- Raw datasets in `datasets/` → `build_unified_dataset.py` → single-class YOLO dataset (512x512) with `data.yaml`
+- Training notebooks in `notebooks/` (numbered for experiment tracking)
+- See `notebooks/EXPERIMENT_7_README.md` for latest experiment details
 
-## Sharp edges / mismatches to be aware of
-- `package.json` references `src/index.html`, but this repo's source HTML is currently `index.html` at the repo root (no `src/` directory). The `npm run build` script may need updating.
-- The docs in `README.md` / `docs/api-reference.md` describe a broader "overlay app" UI than what's currently present in `index.html` (use `index.html` as the source of truth).
-- Detection requires the backend to be running (`http://localhost:8000`). If unavailable, UI gracefully degrades to showing just the 360° panorama.
-- Training is done on Kaggle, not locally. There is no local Docker setup.
+## Sharp edges / mismatches
+- `package.json` references `src/index.html` but actual source is `index.html` at repo root (no `src/` dir)
+- `run-sign-detector.sh` and `start-sign-detector.sh` expect `sign-detector/` subdirectory that doesn't exist in current repo structure
+- Detection requires backend on `http://localhost:8000` — UI gracefully degrades without it
+- Training is on Kaggle, not locally — no Docker setup currently in use
