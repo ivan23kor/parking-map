@@ -311,6 +311,7 @@
     <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
     
     <!-- Config and Modules -->
+    <script src="/env.js"></script>
     <script src="../config.js"></script>
     <script src="../js/utils.js"></script>
     <script src="../js/streets.js"></script>
@@ -341,6 +342,7 @@
         let streetsLayer;
         let streetViewDotsLayer;
         let selectionLayer;
+        let signMarkersLayer;
         let isSelecting = false;
         let isDrawingRect = false;
         let selectionStart = null;
@@ -371,6 +373,7 @@
             // Initialize layers
             streetsLayer = L.layerGroup().addTo(map);
             streetViewDotsLayer = L.layerGroup().addTo(map);
+            signMarkersLayer = L.layerGroup().addTo(map);
             selectionLayer = L.layerGroup().addTo(map);
 
             // Set up event handlers
@@ -395,6 +398,7 @@
             document.getElementById('clearStreets').addEventListener('click', () => {
                 streetsLayer.clearLayers();
                 streetViewDotsLayer.clearLayers();
+                signMarkersLayer.clearLayers();
                 currentPoints = [];
                 currentPanoIds = [];
             });
@@ -749,10 +753,66 @@
 
             try {
                 // Use current POV (heading, pitch, zoom/FOV) for detection
-                await runDetectionOnPanorama(panoId, null, statusEl, true, useSahi);
+                const result = await runDetectionOnPanorama(panoId, null, statusEl, true, useSahi);
+
+                // Project detected signs onto the map
+                if (currentDetections.length > 0) {
+                    plotDetectedSigns();
+                }
             } catch (err) {
                 console.error('Re-detection failed:', err);
                 statusEl.textContent = 'Detection failed.';
+            }
+        }
+
+        /**
+         * Project detected signs from the current panorama onto the Leaflet map.
+         * Uses pitch-based distance estimation via estimateSignLocation().
+         */
+        function plotDetectedSigns() {
+            if (!detectionPanorama || currentDetections.length === 0) return;
+
+            // Get camera position from the panorama
+            const pos = detectionPanorama.getPosition();
+            if (!pos) {
+                console.warn('Cannot plot signs: no panorama position');
+                return;
+            }
+            const cameraLat = pos.lat();
+            const cameraLng = pos.lng();
+
+            // Estimate real-world location for each detection
+            const signLocations = estimateAllSignLocations(cameraLat, cameraLng);
+
+            for (const sign of signLocations) {
+                // Create sign marker (red/orange to distinguish from blue SV dots)
+                const marker = L.circleMarker([sign.lat, sign.lng], {
+                    radius: 8,
+                    fillColor: '#e53e3e',
+                    color: '#c53030',
+                    weight: 2,
+                    opacity: 0.9,
+                    fillOpacity: 0.8
+                }).addTo(signMarkersLayer);
+
+                const distLabel = sign.distance.toFixed(1);
+                const confLabel = (sign.confidence * 100).toFixed(0);
+                marker.bindTooltip(
+                    `🅿️ ${sign.class_name} (${confLabel}%)<br>` +
+                    `${distLabel}m from camera (${sign.method})`,
+                    { permanent: false, direction: 'top' }
+                );
+
+                // Also draw a line from camera to sign
+                L.polyline(
+                    [[cameraLat, cameraLng], [sign.lat, sign.lng]],
+                    { color: '#e53e3e', weight: 1, opacity: 0.4, dashArray: '4,4' }
+                ).addTo(signMarkersLayer);
+
+                console.log(
+                    `Sign plotted: ${sign.class_name} at (${sign.lat.toFixed(6)}, ${sign.lng.toFixed(6)}) ` +
+                    `dist=${distLabel}m heading=${sign.heading.toFixed(1)}° method=${sign.method}`
+                );
             }
         }
 

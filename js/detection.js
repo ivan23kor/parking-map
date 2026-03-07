@@ -1071,6 +1071,90 @@ async function cropAndSaveSign(det, cropCenterOverride = null) {
     }
 }
 
+// Google Street View camera height in meters (roof-mounted camera)
+const SV_CAMERA_HEIGHT = 2.5;
+
+/**
+ * Estimate the real-world location of a detected sign using pitch-based distance estimation.
+ *
+ * The idea: if the camera is at a known height and the sign appears at a negative pitch
+ * (below the horizon), we can compute the ground distance using trigonometry:
+ *
+ *   distance = cameraHeight / tan(|pitch|)
+ *
+ * Then we project that distance along the sign's compass heading from the camera position
+ * using turf.destination().
+ *
+ * @param {number} cameraLat - Panorama camera latitude
+ * @param {number} cameraLng - Panorama camera longitude
+ * @param {Object} detection - Detection with {heading, pitch, confidence, class_name}
+ * @param {number} [cameraHeight=2.5] - Camera height in meters
+ * @returns {Object|null} {lat, lng, distance, heading, confidence, class_name} or null if unusable
+ */
+function estimateSignLocation(cameraLat, cameraLng, detection, cameraHeight = SV_CAMERA_HEIGHT) {
+    const pitch = detection.pitch;
+
+    // Signs at or above horizon can't be distance-estimated via pitch
+    // Use a minimum downward angle of -1° to avoid huge/infinite distances
+    if (pitch >= -1) {
+        // Fallback: place at a fixed distance of 10m
+        const fallbackDistance = 0.010; // km
+        const dest = turf.destination(
+            turf.point([cameraLng, cameraLat]),
+            fallbackDistance,
+            detection.heading,
+            { units: 'kilometers' }
+        );
+        return {
+            lat: dest.geometry.coordinates[1],
+            lng: dest.geometry.coordinates[0],
+            distance: fallbackDistance * 1000,
+            heading: detection.heading,
+            confidence: detection.confidence,
+            class_name: detection.class_name,
+            method: 'fallback'
+        };
+    }
+
+    // Pitch-based distance: distance = height / tan(|pitch|)
+    const absPitchRad = Math.abs(pitch) * Math.PI / 180;
+    let distance = cameraHeight / Math.tan(absPitchRad);
+
+    // Clamp to reasonable range (3m – 50m)
+    distance = Math.max(3, Math.min(50, distance));
+
+    // Project from camera position along the sign's heading
+    const distKm = distance / 1000;
+    const dest = turf.destination(
+        turf.point([cameraLng, cameraLat]),
+        distKm,
+        detection.heading,
+        { units: 'kilometers' }
+    );
+
+    return {
+        lat: dest.geometry.coordinates[1],
+        lng: dest.geometry.coordinates[0],
+        distance,
+        heading: detection.heading,
+        confidence: detection.confidence,
+        class_name: detection.class_name,
+        method: 'pitch'
+    };
+}
+
+/**
+ * Estimate locations for all current detections.
+ * @param {number} cameraLat - Panorama camera latitude
+ * @param {number} cameraLng - Panorama camera longitude
+ * @returns {Array} Array of estimated sign locations
+ */
+function estimateAllSignLocations(cameraLat, cameraLng) {
+    return currentDetections
+        .map(det => estimateSignLocation(cameraLat, cameraLng, det))
+        .filter(loc => loc !== null);
+}
+
 /**
  * Clean up detection panorama when closing modal.
  */
