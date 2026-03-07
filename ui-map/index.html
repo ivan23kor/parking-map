@@ -67,14 +67,6 @@
         background: #005a87;
       }
 
-      select {
-        padding: 8px 12px;
-        border-radius: 4px;
-        border: 1px solid #ccc;
-        font-size: 14px;
-        cursor: pointer;
-      }
-
       #progressContainer {
         opacity: 0;
         transition: opacity 0.3s ease;
@@ -109,10 +101,7 @@
         top: 16px;
         left: 16px;
         z-index: 2001;
-        display: flex;
-        gap: 10px;
-        align-items: center;
-        padding: 10px 12px;
+        padding: 10px;
         border-radius: 12px;
         background: rgba(17, 24, 39, 0.78);
         backdrop-filter: blur(10px);
@@ -133,51 +122,10 @@
         background: white;
       }
 
-      #detectionControls select {
-        padding: 10px 12px;
-        border-radius: 8px;
-        border: none;
-        font-size: 14px;
-        cursor: pointer;
-        background: rgba(255, 255, 255, 0.92);
-      }
-
-      #detectionControls select:hover {
-        background: white;
-      }
-
       #detectionPanorama {
         width: 100%;
         height: 100%;
         position: relative;
-      }
-
-      #emptyPanoramaState {
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        z-index: 2;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 32px;
-        color: rgba(255, 255, 255, 0.86);
-        text-align: center;
-        font-size: 16px;
-        line-height: 1.5;
-        background:
-          radial-gradient(
-            circle at top,
-            rgba(59, 130, 246, 0.18),
-            transparent 38%
-          ),
-          linear-gradient(180deg, rgba(17, 24, 39, 0.3), rgba(17, 24, 39, 0.92));
-      }
-
-      #emptyPanoramaState.hidden {
-        display: none;
       }
 
       #detectionOverlay {
@@ -293,7 +241,6 @@
         }
 
         #detectionControls {
-          flex-wrap: wrap;
           right: 16px;
         }
       }
@@ -303,24 +250,11 @@
     <div id="splitLayout">
       <section id="panoramaPane" aria-label="Street View panorama">
         <div id="detectionControls">
-          <select id="detectionSideToggle">
-            <option value="right">Right side</option>
-            <option value="left">Left side</option>
-          </select>
-          <select id="detectMode">
-            <option value="standard">Standard</option>
-            <option value="sahi" selected>SAHI</option>
-          </select>
           <button id="redetectBtn">Detect</button>
-          <button id="clearPanoramaBtn">Clear</button>
         </div>
         <div id="detectionPanorama"></div>
-        <div id="emptyPanoramaState">
-          Select an area on the map, then click a Street View point to load the
-          panorama on the left.
-        </div>
         <svg id="detectionOverlay"></svg>
-        <div id="detectionStatus">Select a Street View point on the map.</div>
+        <div id="detectionStatus">Loading panorama...</div>
         <div id="detectionInfo"></div>
       </section>
 
@@ -436,6 +370,9 @@
       let currentPanoIds = [];
       const SIGN_MAP_STORAGE_KEY = "parksight_latest_sign_map_data";
       const SIGN_MAP_PROJECTION_VERSION = 2;
+      const INITIAL_LOCATION = { lat: 42.3615, lon: -71.0921 };
+      const DEFAULT_SIDE = "right";
+      const BASE_HEADING = 90;
 
       function normalizeSignMapStore(parsed) {
         if (!parsed) {
@@ -720,7 +657,7 @@
       /**
        * Initialize the application after Google Maps API loads.
        */
-      function initApp() {
+      async function initApp() {
         // Check API key
         if (!window.GOOGLE_CONFIG?.API_KEY) {
           showError(
@@ -769,6 +706,8 @@
         console.log("App initialized");
         setTimeout(() => map.invalidateSize(), 0);
         window.addEventListener("resize", () => map.invalidateSize());
+
+        await loadDefaultPanorama();
       }
 
       /**
@@ -779,12 +718,6 @@
         document
           .getElementById("redetectBtn")
           .addEventListener("click", rerunDetection);
-        document
-          .getElementById("clearPanoramaBtn")
-          .addEventListener("click", clearPanoramaPane);
-        document
-          .getElementById("detectionSideToggle")
-          .addEventListener("change", updatePanoramaSide);
 
         // Hold Ctrl to enable selection mode
         document.addEventListener("keydown", (e) => {
@@ -863,6 +796,42 @@
             map.doubleClickZoom.enable();
           }
         });
+      }
+
+      async function loadDefaultPanorama() {
+        const statusEl = document.getElementById("detectionStatus");
+
+        try {
+          statusEl.textContent = "Getting session...";
+          const session = await getSessionToken();
+
+          statusEl.textContent = "Finding Street View coverage...";
+          const panoIds = await fetchPanoIds([INITIAL_LOCATION], session);
+          const panoId = panoIds[0];
+
+          if (!panoId) {
+            statusEl.textContent =
+              "No Street View coverage at the default location.";
+            return;
+          }
+
+          currentDetectionContext = {
+            panoId,
+            heading:
+              (calculateHeadingWithSide(BASE_HEADING, DEFAULT_SIDE) + 180) %
+              360,
+            pointIndex: null,
+            side: DEFAULT_SIDE,
+            streetBearing: BASE_HEADING,
+            oneway: null,
+            streetName: "34 Vassar St",
+          };
+
+          initPanoramaForContext();
+        } catch (err) {
+          console.error("Default panorama init failed:", err);
+          statusEl.textContent = "Failed to load default panorama.";
+        }
       }
 
       /**
@@ -1074,41 +1043,25 @@
 
         if (!point || !panoId) return;
 
-        const side = document.getElementById("detectionSideToggle").value;
-        // Add 180° to look at the opposite side of the street
-        const heading =
-          (calculateHeadingWithSide(point.bearing, side, point.oneway) + 180) %
-          360;
-
         // Store context for detection (pointIndex for position fallback)
         currentDetectionContext = {
           panoId,
-          heading,
+          heading:
+            (calculateHeadingWithSide(
+              point.bearing,
+              DEFAULT_SIDE,
+              point.oneway,
+            ) +
+              180) %
+            360,
           pointIndex: index,
-          side,
+          side: DEFAULT_SIDE,
           streetBearing: point.bearing,
           oneway: point.oneway || null,
           streetName: point.streetName || "Unknown street",
         };
 
-        const statusEl = document.getElementById("detectionStatus");
-        const infoEl = document.getElementById("detectionInfo");
-        const emptyStateEl = document.getElementById("emptyPanoramaState");
-
-        document.getElementById("detectionSideToggle").value = side;
-
-        emptyStateEl.classList.add("hidden");
-        statusEl.textContent = "Loading panorama...";
-
-        const streetName = point.streetName || "Unknown street";
-        infoEl.textContent = `${streetName} • Heading: ${Math.round(heading)}°`;
-
-        // Initialize panorama
-        const container = document.getElementById("detectionPanorama");
-        initDetectionPanorama(panoId, heading, container);
-
-        // Update status - no auto-detection, user clicks Re-detect
-        statusEl.textContent = `Click "Detect" to scan (heading: ${Math.round(heading)}°, v2)`;
+        initPanoramaForContext();
       }
 
       /**
@@ -1119,14 +1072,10 @@
 
         const { panoId } = currentDetectionContext;
         const statusEl = document.getElementById("detectionStatus");
-        const useSahi = document.getElementById("detectMode").value === "sahi";
-        currentDetectionContext.side = document.getElementById(
-          "detectionSideToggle",
-        ).value;
 
         try {
           // Use current POV (heading, pitch, zoom/FOV) for detection
-          await runDetectionOnPanorama(panoId, null, statusEl, true, useSahi);
+          await runDetectionOnPanorama(panoId, null, statusEl, true, true);
 
           // Project detected signs onto the map
           console.log(
@@ -1163,12 +1112,15 @@
         }
 
         const idx = currentDetectionContext?.pointIndex;
-        if (idx == null || !currentPoints[idx]) {
-          console.error("plotDetectedSigns: no pointIndex in context");
-          return;
-        }
-        const cameraLat = currentPoints[idx].lat;
-        const cameraLng = currentPoints[idx].lon;
+        const fallbackPosition = detectionPanorama?.getPosition?.();
+        const cameraLat =
+          idx != null && currentPoints[idx]
+            ? currentPoints[idx].lat
+            : (fallbackPosition?.lat?.() ?? INITIAL_LOCATION.lat);
+        const cameraLng =
+          idx != null && currentPoints[idx]
+            ? currentPoints[idx].lon
+            : (fallbackPosition?.lng?.() ?? INITIAL_LOCATION.lon);
         const signLocations = estimateAllSignLocations(cameraLat, cameraLng, {
           streetBearing: currentDetectionContext.streetBearing,
           oneway: currentDetectionContext.oneway,
@@ -1190,44 +1142,18 @@
         renderSignMapData(store);
       }
 
-      function updatePanoramaSide() {
-        if (!currentDetectionContext) return;
+      function initPanoramaForContext() {
+        if (!currentDetectionContext?.panoId) return;
 
-        currentDetectionContext.side = document.getElementById(
-          "detectionSideToggle",
-        ).value;
-        const point = currentPoints[currentDetectionContext.pointIndex];
-        if (!point || !currentDetectionContext.panoId) return;
-
-        const heading =
-          (calculateHeadingWithSide(
-            point.bearing,
-            currentDetectionContext.side,
-            point.oneway,
-          ) +
-            180) %
-          360;
-        currentDetectionContext.heading = heading;
+        const statusEl = document.getElementById("detectionStatus");
         document.getElementById("detectionInfo").textContent =
-          `${currentDetectionContext.streetName} • Heading: ${Math.round(heading)}°`;
+          `${currentDetectionContext.streetName} • Heading: ${Math.round(currentDetectionContext.heading)}°`;
         initDetectionPanorama(
           currentDetectionContext.panoId,
-          heading,
+          currentDetectionContext.heading,
           document.getElementById("detectionPanorama"),
         );
-        document.getElementById("detectionStatus").textContent =
-          `Click "Detect" to scan (heading: ${Math.round(heading)}°, v2)`;
-      }
-
-      function clearPanoramaPane() {
-        cleanupDetectionPanorama();
-        currentDetectionContext = null;
-        document
-          .getElementById("emptyPanoramaState")
-          .classList.remove("hidden");
-        document.getElementById("detectionInfo").textContent = "";
-        document.getElementById("detectionStatus").textContent =
-          "Select a Street View point on the map.";
+        statusEl.textContent = `Click "Detect" to scan (heading: ${Math.round(currentDetectionContext.heading)}°, v2)`;
       }
     </script>
   </body>
