@@ -10,22 +10,51 @@ Three main parts:
 
 ## Common commands
 ### Run static app locally
-- Serve repo root on `http://localhost:8080` (injects `GOOGLE_MAPS_API_KEY` from env):
+- Start the full local stack in one command:
   ```bash
-  npm run serve
-  # or
-  node serve.js
+  GOOGLE_MAPS_API_KEY=... bun run start
+  ```
+  This starts:
+  - the static app on `http://127.0.0.1:8080`
+  - the FastAPI detection backend on `http://127.0.0.1:8000`
+  - backend and web logs under `logs/backend.log` and `logs/web.log`
+
+- Start only the static app on `http://localhost:8080` (injects `GOOGLE_MAPS_API_KEY` from env):
+  ```bash
+  GOOGLE_MAPS_API_KEY=... bun run start:web
   ```
 
-- Serve Python version:
+- Start only the backend:
+  ```bash
+  bun run start:backend
+  ```
+
+- Serve Python version for the static files only:
   ```bash
   python3 serve.py
   ```
 
 ### Build Next.js upload UI
 ```bash
-npm run build    # Builds ui-upload/ to ui-upload/out/
+bun run build    # Builds ui-upload/ to ui-upload/out/
 ```
+
+### Run UI end-to-end tests
+These tests cover the `ui-map` detection flow end to end with mocked Google Maps, Leaflet, and detection API responses. They verify:
+- detection still works when `detect-sahi` is unavailable and the UI falls back to `/detect`
+- projected sign markers are persisted on the 2D map
+- curb-line projection stays parallel to the selected street segment
+
+Commands:
+```bash
+bun install
+bunx playwright install chromium
+bun run test:e2e
+```
+
+Files:
+- `tests/ui-map.e2e.spec.js`
+- `playwright.config.js`
 
 ### Build ML training dataset
 ```bash
@@ -118,6 +147,6 @@ Data flow:
 
 ## Sharp edges / mismatches
 - `package.json` references `src/index.html` but actual source is `index.html` at repo root (no `src/` dir)
-- `run-sign-detector.sh` and `start-sign-detector.sh` expect `sign-detector/` subdirectory that doesn't exist in current repo structure
+- `run-sign-detector.sh` and `start-sign-detector.sh` are compatibility wrappers around `scripts/start-stack.sh`
 - Detection requires backend on `http://localhost:8000` — UI gracefully degrades without it
 - Training is on Kaggle, not locally — no Docker setup currently in use
