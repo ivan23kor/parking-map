@@ -1543,10 +1543,13 @@ async function fetchDetectionCropPreview(det, panoId) {
 const SV_CAMERA_HEIGHT = 2.5;
 const EARTH_RADIUS_METERS = 6371000;
 const PARKING_SIGN_FACE_HEIGHT_METERS = 0.75;
-// Approximate offset from the street centerline to the curb edge where signs stand.
-// Keep this conservative so projected markers stay on the road/sidewalk boundary
-// rather than drifting into parcels or building footprints.
-const CURB_OFFSET_METERS = 3.5;
+// Approximate lane width and edge inset used to snap detections onto the
+// visible road edge when OSM does not provide explicit width data.
+const DEFAULT_LANE_WIDTH_METERS = 3.2;
+const ROAD_EDGE_INSET_METERS = 0.35;
+const MIN_ROAD_EDGE_OFFSET_METERS = 2.4;
+const MAX_ROAD_EDGE_OFFSET_METERS = 6.2;
+const SIDE_INFERENCE_MIN_LATERAL_DEGREES = 28;
 
 /**
  * Project a point from a start lat/lng by distance and bearing.
@@ -1682,6 +1685,100 @@ function getTrafficBearing(streetBearing, oneway = null) {
   return bearing;
 }
 
+function getStreetFrame(options = {}) {
+  const { segmentStart, segmentEnd } = options;
+  if (!segmentStart || !segmentEnd) {
+    return null;
+  }
+
+  const originLat = (segmentStart.lat + segmentEnd.lat) / 2;
+  const originLng = (segmentStart.lon + segmentEnd.lon) / 2;
+  const start = latLngToLocalMeters(
+    segmentStart.lat,
+    segmentStart.lon,
+    originLat,
+    originLng,
+  );
+  const end = latLngToLocalMeters(
+    segmentEnd.lat,
+    segmentEnd.lon,
+    originLat,
+    originLng,
+  );
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const length = Math.sqrt(dx * dx + dy * dy);
+  if (length <= 1e-6) {
+    return null;
+  }
+
+  return {
+    originLat,
+    originLng,
+    alongUnit: {
+      x: dx / length,
+      y: dy / length,
+    },
+    rightUnit: {
+      x: dy / length,
+      y: -dx / length,
+    },
+  };
+}
+
+function toStreetFrame(lat, lng, frame) {
+  const point = latLngToLocalMeters(lat, lng, frame.originLat, frame.originLng);
+  return {
+    along: point.x * frame.alongUnit.x + point.y * frame.alongUnit.y,
+    right: point.x * frame.rightUnit.x + point.y * frame.rightUnit.y,
+  };
+}
+
+function fromStreetFrame(along, right, frame) {
+  return localMetersToLatLng(
+    along * frame.alongUnit.x + right * frame.rightUnit.x,
+    along * frame.alongUnit.y + right * frame.rightUnit.y,
+    frame.originLat,
+    frame.originLng,
+  );
+}
+
+function inferDetectionSide(signHeading, trafficBearing, fallbackSide = "right") {
+  const delta = signedAngleDeltaDegrees(signHeading, trafficBearing);
+  if (Math.abs(delta) < SIDE_INFERENCE_MIN_LATERAL_DEGREES) {
+    return fallbackSide;
+  }
+  return Math.sin((delta * Math.PI) / 180) >= 0 ? "right" : "left";
+}
+
+function estimateRoadEdgeOffsetMeters(options = {}) {
+  const { lanes = null, highway = null } = options;
+  const parsedLanes =
+    typeof lanes === "string"
+      ? parseFloat(lanes.split(";")[0])
+      : Number.isFinite(lanes)
+        ? lanes
+        : null;
+
+  let laneCount = parsedLanes;
+  if (!(laneCount > 0)) {
+    laneCount =
+      ({
+        primary: 4,
+        secondary: 3,
+        tertiary: 2,
+        residential: 2,
+        unclassified: 2,
+      })[highway] || 2;
+  }
+
+  return clamp(
+    (laneCount * DEFAULT_LANE_WIDTH_METERS) / 2 - ROAD_EDGE_INSET_METERS,
+    MIN_ROAD_EDGE_OFFSET_METERS,
+    MAX_ROAD_EDGE_OFFSET_METERS,
+  );
+}
+
 function projectSignToCurbLine(
   cameraLat,
   cameraLng,
@@ -1693,49 +1790,91 @@ function projectSignToCurbLine(
     streetBearing,
     side = "right",
     oneway = null,
-    curbOffsetMeters = CURB_OFFSET_METERS,
+    curbOffsetMeters = null,
     segmentStart = null,
     segmentEnd = null,
+    lanes = null,
+    highway = null,
   } = options;
   if (streetBearing == null) {
     return null;
   }
 
   const trafficBearing = getTrafficBearing(streetBearing, oneway);
+  const resolvedSide = inferDetectionSide(signHeading, trafficBearing, side);
+  const edgeOffsetMeters =
+    curbOffsetMeters ?? estimateRoadEdgeOffsetMeters({ lanes, highway });
   const centerlineAnchor = getStreetCenterlineAnchor(cameraLat, cameraLng, {
     segmentStart,
     segmentEnd,
   });
-  const lateralBearing =
-    side === "left" ? trafficBearing - 90 : trafficBearing + 90;
-  const curbOrigin = projectLatLng(
-    centerlineAnchor.lat,
-    centerlineAnchor.lng,
-    curbOffsetMeters,
-    lateralBearing,
-  );
   const headingDelta = signedAngleDeltaDegrees(signHeading, trafficBearing);
   const headingDeltaRad = (headingDelta * Math.PI) / 180;
   const rawAlongStreetDistance = distanceMeters * Math.cos(headingDeltaRad);
+  const alongStreetDistance = clamp(
+    rawAlongStreetDistance,
+    -distanceMeters,
+    distanceMeters,
+  );
+  const frame = getStreetFrame({ segmentStart, segmentEnd });
 
-  // Keep markers on the selected curb, but preserve the sign's progress along
-  // the block. The previous "intersect the curb ray" clamp collapsed
-  // straight-ahead signs back onto the pano point because their lateral offset
-  // was near zero even when they were clearly far down the street.
-  const alongStreetDistance = clamp(rawAlongStreetDistance, -distanceMeters, distanceMeters);
+  if (!frame) {
+    const lateralBearing =
+      resolvedSide === "left" ? trafficBearing - 90 : trafficBearing + 90;
+    const curbOrigin = projectLatLng(
+      centerlineAnchor.lat,
+      centerlineAnchor.lng,
+      edgeOffsetMeters,
+      lateralBearing,
+    );
+
+    return {
+      ...projectSignedDistance(
+        curbOrigin.lat,
+        curbOrigin.lng,
+        alongStreetDistance,
+        trafficBearing,
+      ),
+      alongStreetDistance,
+      rawAlongStreetDistance,
+      curbOffsetMeters: edgeOffsetMeters,
+      trafficBearing,
+      side: resolvedSide,
+    };
+  }
+
+  const cameraFrame = toStreetFrame(cameraLat, cameraLng, frame);
+  const cameraAlong = cameraFrame.along;
+  const targetRight = resolvedSide === "left" ? -edgeOffsetMeters : edgeOffsetMeters;
+  const signHeadingRad = (normalizeBearingDegrees(signHeading) * Math.PI) / 180;
+  const headingVector = {
+    x: Math.sin(signHeadingRad),
+    y: Math.cos(signHeadingRad),
+  };
+  const rayAlong =
+    headingVector.x * frame.alongUnit.x + headingVector.y * frame.alongUnit.y;
+  const rayRight =
+    headingVector.x * frame.rightUnit.x + headingVector.y * frame.rightUnit.y;
+  let snappedAlong = cameraAlong + alongStreetDistance;
+
+  if (Math.abs(rayRight) > 0.035) {
+    const rayDistanceToEdge = (targetRight - cameraFrame.right) / rayRight;
+    const maxRayDistance = Math.max(distanceMeters * 2.25, distanceMeters + 10);
+    if (rayDistanceToEdge > 0.5 && rayDistanceToEdge <= maxRayDistance) {
+      snappedAlong = cameraAlong + rayAlong * rayDistanceToEdge;
+    }
+  }
+
+  const snapped = fromStreetFrame(snappedAlong, targetRight, frame);
 
   return {
-    ...projectSignedDistance(
-      curbOrigin.lat,
-      curbOrigin.lng,
-      alongStreetDistance,
-      trafficBearing,
-    ),
-    alongStreetDistance,
+    lat: snapped.lat,
+    lng: snapped.lng,
+    alongStreetDistance: snappedAlong - cameraAlong,
     rawAlongStreetDistance,
-    curbOffsetMeters,
+    curbOffsetMeters: edgeOffsetMeters,
     trafficBearing,
-    side,
+    side: resolvedSide,
   };
 }
 

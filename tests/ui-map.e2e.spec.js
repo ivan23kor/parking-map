@@ -356,7 +356,7 @@ test.describe("ui-map detection flow", () => {
     };
     const distances = signs.map((sign) => perpendicularDistanceMeters(sign, segment));
     expect(Math.abs(distances[0] - distances[1])).toBeLessThan(0.75);
-    expect(distances[0]).toBeGreaterThan(2);
-    expect(distances[0]).toBeLessThan(6);
+    expect(distances[0]).toBeGreaterThan(2.4);
+    expect(distances[0]).toBeLessThan(4.25);
   });
 });

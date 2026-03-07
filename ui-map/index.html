@@ -379,7 +379,7 @@
       let currentPanoIds = [];
       let latestRenderedSignMapData = null;
       const SIGN_MAP_STORAGE_KEY = "parksight_latest_sign_map_data";
-      const SIGN_MAP_PROJECTION_VERSION = 4;
+      const SIGN_MAP_PROJECTION_VERSION = 5;
       const INITIAL_LOCATION = { lat: 42.3615, lon: -71.0921 };
       const DEFAULT_SIDE = "right";
       const BASE_HEADING = 90;
@@ -1102,6 +1102,8 @@
           side: DEFAULT_SIDE,
           streetBearing: point.bearing,
           oneway: point.oneway || null,
+          highway: point.highway || null,
+          lanes: point.lanes || null,
           segmentStart: point.segmentStart || null,
           segmentEnd: point.segmentEnd || null,
           streetName: point.streetName || "Unknown street",
@@ -1173,12 +1175,13 @@
           streetBearing: currentDetectionContext.streetBearing,
           oneway: currentDetectionContext.oneway,
           side: getProjectionSide(currentDetectionContext.side),
+          highway: currentDetectionContext.highway || null,
+          lanes: currentDetectionContext.lanes || null,
           segmentStart: currentDetectionContext.segmentStart || null,
           segmentEnd: currentDetectionContext.segmentEnd || null,
         });
         const detectedPanoId =
           detectionPanorama?.getPano?.() || currentDetectionContext.panoId;
-        await hydrateDetectionPreviews(signLocations, detectedPanoId);
         const detectionEntry = {
           savedAt: Date.now(),
           source: "ui-map",
@@ -1191,8 +1194,20 @@
           signs: signLocations,
         };
 
-        const store = appendSignMapDetection(detectionEntry);
-        renderSignMapData(store);
+        const initialStore = appendSignMapDetection(detectionEntry);
+        renderSignMapData(initialStore);
+
+        hydrateDetectionPreviews(signLocations, detectedPanoId)
+          .then(() => {
+            const hydratedStore = appendSignMapDetection({
+              ...detectionEntry,
+              signs: signLocations,
+            });
+            renderSignMapData(hydratedStore);
+          })
+          .catch((previewErr) => {
+            console.warn("Sign preview hydration failed:", previewErr);
+          });
       }
 
       function initPanoramaForContext() {
