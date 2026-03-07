@@ -4,7 +4,7 @@ This file provides guidance when working with code in this repository.
 
 ## Repo at a glance
 Three main parts:
-1. **Static map/panorama viewers** (`index.html`, `ui-map/`, `ui-panorama/`): Leaflet + Turf + Google Maps JS API with modular JS in `js/`
+1. **Split panorama/2D map viewer** (`index.html`): Leaflet + Turf + Google Maps JS API with modular JS in `js/`
 2. **Next.js upload UI** (`ui-upload/`): shadcn/ui component library for uploading/detecting parking signs
 3. **Parking-sign ML backend** (`backend/`): FastAPI YOLO11 detection service + training pipeline (`datasets/`, `notebooks/`)
 
@@ -24,13 +24,19 @@ Three main parts:
   ```bash
   GOOGLE_MAPS_API_KEY=... bun run start
   ```
-  Use this instead of `bun run start:web` when detection, previews, or any map workflow depends on the backend being available.
+  `bun run start` and `bun run start:web` now both boot the full stack.
 
-- Start only the static app on `http://localhost:8080` (injects `GOOGLE_MAPS_API_KEY` from env):
+- Start the web app with the full backend stack on `http://localhost:8080` (injects `GOOGLE_MAPS_API_KEY` from env):
   ```bash
   GOOGLE_MAPS_API_KEY=... bun run start:web
   ```
-  This does not start the detection backend. Detection and preview requests will hard-fail until the backend is started separately.
+  This starts the backend and web server together so detection works immediately.
+
+- Serve only the static app on `http://localhost:8080` (injects `GOOGLE_MAPS_API_KEY` from env):
+  ```bash
+  GOOGLE_MAPS_API_KEY=... bun run serve:static
+  ```
+  Detection and preview requests will fail in this mode because the backend is not started.
 
 - Start only the backend:
   ```bash
@@ -49,8 +55,8 @@ bun run build    # Builds ui-upload/ to ui-upload/out/
 ```
 
 ### Run UI end-to-end tests
-These tests cover the `ui-map` detection flow end to end with mocked Google Maps, Leaflet, and detection API responses. They verify:
-- detection failures surface correctly when the backend or `detect-sahi` is unavailable
+These tests cover the detection flow end to end with mocked Google Maps, Leaflet, and detection API responses. They verify:
+- detection falls back to single-view inference when panorama detection is unavailable
 - projected sign markers are persisted on the 2D map
 - curb-line projection stays parallel to the selected street segment
 
@@ -62,7 +68,7 @@ bun run test:e2e
 ```
 
 Files:
-- `tests/ui-map.e2e.spec.js`
+- `tests/detection.e2e.spec.js`
 - `playwright.config.js`
 
 ### Build ML training dataset
@@ -94,8 +100,8 @@ python3 -m venv .venv
 See `notebooks/EXPERIMENT_7_README.md` for latest experiment details.
 
 ## Architecture (big picture)
-### 1) Static web app (`index.html`, `ui-map/`, `ui-panorama/`)
-Modular vanilla JS apps.
+### 1) Static web app (`index.html`)
+Split panorama/2D map viewer for parking sign detection.
 
 **File structure:**
 ```
@@ -106,10 +112,7 @@ js/
 ├── panorama.js     # Shared panorama config (pitch, zoom, heading offset)
 ├── streetview.js   # Session tokens, panoIds bulk fetch, panorama display
 └── detection.js    # YOLO detection API calls, bounding box rendering
-ui-map/
-└── index.html      # Map-based UI with area selection
-ui-panorama/
-└── index.html      # Single panorama UI (Calgary Tower demo)
+index.html          # Split panorama/2D map view
 ```
 
 **Key pieces:**
@@ -142,7 +145,8 @@ FastAPI service running YOLO11 inference on Street View images.
 - `POST /detect` — Run detection on image URL
   - Request: `{"image_url": "...", "confidence": 0.15}`
   - Response: `{"detections": [{"x1", "y1", "x2", "y2", "confidence", "class_name"}], "inference_time_ms": ...}`
-- `POST /detect-sahi` — Slicing Aided Hyper Inference (overlapping higher-zoom windows)
+- `POST /detect-panorama` — Primary panorama detection endpoint (multi-slice inference)
+- `POST /detect-sahi` — Compatibility alias for panorama detection
 - `POST /crop-sign-tiles` — Fetch/stitch/crop Street View tiles at max zoom
 - `POST /preview-sign` — Fetch sign-centered Street View at tight FOV
 - `GET /detect-debug` — Return image with bounding boxes drawn
@@ -160,5 +164,5 @@ Data flow:
 ## Sharp edges / mismatches
 - `package.json` references `src/index.html` but actual source is `index.html` at repo root (no `src/` dir)
 - `run-sign-detector.sh` and `start-sign-detector.sh` are compatibility wrappers around `scripts/start-stack.sh`
-- Detection requires backend on `http://127.0.0.1:8000` — UI detection and preview actions will hard-fail without it, so agents should prefer `GOOGLE_MAPS_API_KEY=... bun run start`
+- Detection requires backend on `http://127.0.0.1:8000` — `bun run start` and `bun run start:web` both start the full stack; `bun run serve:static` is backend-free on purpose
 - Training is on Kaggle, not locally — no Docker setup currently in use

@@ -97,7 +97,7 @@ bun run serve >"$LOG_DIR/web.log" 2>&1 &
 WEB_PID=$!
 
 echo "Stack is ready."
-echo "UI: http://127.0.0.1:${WEB_PORT}/ui-map/"
+echo "UI: http://127.0.0.1:${WEB_PORT}/"
 echo "API: http://127.0.0.1:${BACKEND_PORT}/docs"
 echo "Logs: $LOG_DIR/backend.log and $LOG_DIR/web.log"
 

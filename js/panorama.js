@@ -1,6 +1,5 @@
 /**
  * Shared panorama configuration and initialization.
- * Used by both ui-map and ui-panorama for consistent behavior.
  */
 
 // Default panorama settings

@@ -141,8 +141,8 @@ const GOOGLE_MAPS_STUB = `
 `;
 
 async function mockExternalDependencies(page, options = {}) {
-  const detectSahiResponse =
-    options.detectSahiResponse ??
+  const detectPanoramaResponse =
+    options.detectPanoramaResponse ??
     (() => ({
       status: 404,
       body: JSON.stringify({ detail: "Not Found" }),
@@ -205,11 +205,11 @@ async function mockExternalDependencies(page, options = {}) {
     });
   });
 
-  await page.route("http://127.0.0.1:8000/detect-sahi", async (route) => {
+  await page.route("http://127.0.0.1:8000/detect-panorama", async (route) => {
     const response =
-      typeof detectSahiResponse === "function"
-        ? detectSahiResponse(route.request())
-        : detectSahiResponse;
+      typeof detectPanoramaResponse === "function"
+        ? detectPanoramaResponse(route.request())
+        : detectPanoramaResponse;
     await route.fulfill({
       status: response.status,
       contentType: response.contentType || "application/json",
@@ -269,12 +269,12 @@ function perpendicularDistanceMeters(point, segment) {
   return area2 / len;
 }
 
-test.describe("ui-map detection flow", () => {
+test.describe("detection flow", () => {
   test("builds preview crops with 25% extra vertical margin above and below the sign", async ({
     page,
   }) => {
     await mockExternalDependencies(page);
-    await page.goto("/ui-map/?api_key=test-key");
+    await page.goto("/?api_key=test-key");
 
     const cropPlan = await page.evaluate(async () => {
       return await buildDetectionCropPlan(
@@ -294,28 +294,49 @@ test.describe("ui-map detection flow", () => {
     expect(cropPlan.requestBody.crop_height).toBe(expectedCropHeight);
   });
 
-  test("fails hard when SAHI detection is unavailable", async ({
+  test("falls back to single-view detection when panorama detection is unavailable", async ({
     page,
   }) => {
     await mockExternalDependencies(page);
-    await page.goto("/ui-map/?api_key=test-key");
 
+    await page.addInitScript(() => {
+      window.__TEST_PANORAMA_POSITION = { lat: 42.3615, lng: -71.0921 };
+    });
+
+    await page.goto("/?api_key=test-key");
     await expect(page.locator("#detectionStatus")).toContainText("Click \"Detect\"");
-    await page.locator("#redetectBtn").click();
 
-    await expect(page.locator("#detectionStatus")).toContainText("Detection failed.");
+    await page.evaluate(async () => {
+      currentPoints = [
+        {
+          lat: 42.3615,
+          lon: -71.0921,
+          bearing: 36.5,
+          oneway: null,
+          streetName: "Test Street",
+          segmentStart: { lat: 42.3610, lon: -71.0926 },
+          segmentEnd: { lat: 42.3620, lon: -71.0916 },
+        },
+      ];
+      currentPanoIds = ["mock-pano"];
+      await showDetectionForIndex(0);
+    });
+
+    await page.locator("#redetectBtn").click();
+    await expect(page.locator("#detectionStatus")).toContainText("Found 2 parking signs");
 
     const stored = await page.evaluate(() =>
-      localStorage.getItem("parksight_latest_sign_map_data"),
+      JSON.parse(localStorage.getItem("parksight_latest_sign_map_data")),
     );
-    expect(stored).toBeNull();
+    expect(stored).not.toBeNull();
+    expect(stored.detections).toHaveLength(1);
   });
 
   test("projects signs along a curb line parallel to the selected street segment", async ({
     page,
   }) => {
     await mockExternalDependencies(page, {
-      detectSahiResponse: {
+      detectPanoramaResponse: {
         status: 200,
         body: JSON.stringify({
           detections: [
@@ -346,7 +367,7 @@ test.describe("ui-map detection flow", () => {
       window.__TEST_PANORAMA_POSITION = { lat: 42.3615, lng: -71.0921 };
     });
 
-    await page.goto("/ui-map/?api_key=test-key");
+    await page.goto("/?api_key=test-key");
     await expect(page.locator("#detectionStatus")).toContainText("Click \"Detect\"");
 
     await page.evaluate(async () => {
