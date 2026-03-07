@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Street View Driver Perspective</title>
     <link
+      rel="icon"
+      href='data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"%3E%3Crect width="64" height="64" rx="12" fill="%23111827"/%3E%3Cpath d="M28 10h8v18h12v8H36v18h-8V36H16v-8h12z" fill="%2322c55e"/%3E%3C/svg%3E'
+    />
+    <link
       rel="stylesheet"
       href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
     />
@@ -187,19 +191,24 @@
         z-index: 101;
       }
 
-      #mapDebug {
+      #clearProjectedSignsBtn {
         position: absolute;
         right: 10px;
         bottom: 10px;
         z-index: 1000;
         background: rgba(255, 255, 255, 0.94);
         color: #111;
-        padding: 10px 12px;
+        padding: 10px 14px;
         border-radius: 6px;
         box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
-        font-size: 12px;
-        line-height: 1.4;
-        min-width: 280px;
+        font-size: 13px;
+        line-height: 1;
+        border: none;
+        cursor: pointer;
+      }
+
+      #clearProjectedSignsBtn:hover {
+        background: #fff;
       }
 
       .sign-preview-popup {
@@ -258,7 +267,9 @@
 
       <section id="mapPane" aria-label="Map view">
         <div id="map"></div>
-        <div id="mapDebug">Map debug loading...</div>
+        <button id="clearProjectedSignsBtn" type="button">
+          Clear projected signs
+        </button>
       </section>
     </div>
 
@@ -344,7 +355,7 @@
           return;
         }
         const script = document.createElement("script");
-        script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&callback=initApp`;
+        script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&callback=initApp&loading=async`;
         script.async = true;
         script.defer = true;
         document.head.appendChild(script);
@@ -466,31 +477,10 @@
         return nextStore;
       }
 
-      function updateMapDebug(data = null) {
-        const debugEl = document.getElementById("mapDebug");
-        if (!debugEl || !map) return;
-
-        const bounds = map.getBounds();
-        const center = map.getCenter();
-        const detections = data?.detections || [];
-        const signCount = detections.reduce(
-          (sum, detection) => sum + (detection.signs?.length || 0),
-          0,
-        );
-        const cameraCount = detections.length;
-        const source = data?.source || "none";
-        const latestCamera =
-          cameraCount > 0 && detections[cameraCount - 1]?.camera
-            ? `${detections[cameraCount - 1].camera.lat.toFixed(6)}, ${detections[cameraCount - 1].camera.lng.toFixed(6)}`
-            : "none";
-
-        debugEl.innerHTML =
-          `zoom=${map.getZoom()}<br>` +
-          `center=${center.lat.toFixed(6)}, ${center.lng.toFixed(6)}<br>` +
-          `north=${bounds.getNorth().toFixed(6)} south=${bounds.getSouth().toFixed(6)}<br>` +
-          `east=${bounds.getEast().toFixed(6)} west=${bounds.getWest().toFixed(6)}<br>` +
-          `saved source=${source} cameras=${cameraCount} signs=${signCount}<br>` +
-          `latest camera=${latestCamera}`;
+      function clearProjectedSigns() {
+        latestRenderedSignMapData = normalizeSignMapStore(null);
+        localStorage.removeItem(SIGN_MAP_STORAGE_KEY);
+        signMarkersLayer.clearLayers();
       }
 
       function renderSignMapData(data) {
@@ -500,7 +490,6 @@
         const detections = data?.detections || [];
         if (detections.length === 0) {
           console.log("No persisted sign map data found");
-          updateMapDebug(data);
           return;
         }
 
@@ -572,8 +561,6 @@
         if (boundsPoints.length > 0) {
           map.fitBounds(boundsPoints, { padding: [60, 60], maxZoom: 19 });
         }
-
-        updateMapDebug(data);
       }
 
       function createSignPreviewPopupHtml(sign) {
@@ -746,7 +733,6 @@
         });
 
         map.on("moveend zoomend", () => {
-          updateMapDebug(getLatestSignMapData());
           const bounds = map.getBounds();
           console.log("Map viewport:", {
             zoom: map.getZoom(),
@@ -773,6 +759,9 @@
         document
           .getElementById("redetectBtn")
           .addEventListener("click", rerunDetection);
+        document
+          .getElementById("clearProjectedSignsBtn")
+          .addEventListener("click", clearProjectedSigns);
 
         // Hold Ctrl to enable selection mode
         document.addEventListener("keydown", (e) => {
