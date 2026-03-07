@@ -471,7 +471,7 @@
 
         const nextStore = {
           savedAt: Date.now(),
-          source: detectionEntry.source || store.source || "ui-map",
+          source: detectionEntry.source || store.source || "parksight",
           projectionVersion: SIGN_MAP_PROJECTION_VERSION,
           detections: [
             ...store.detections.filter((existing) => !sameDetection(existing)),
@@ -498,7 +498,7 @@
           return;
         }
 
-        console.log("Loaded sign map data on ui-map:", data);
+        console.log("Loaded sign map data on parksight:", data);
         streetViewDotsLayer.clearLayers();
 
         const projectedMarkerRadius = 10 / 3;
@@ -917,8 +917,7 @@
               refinedView.detection,
               refinedView.panoId,
             );
-            sign.previewSrc = refinedPreview.src;
-            renderSignPreviewContent(container, sign, { src: sign.previewSrc });
+            sign.previewRefinedSrc = refinedPreview.src;
           }
 
           if (latestRenderedSignMapData) {
@@ -1009,21 +1008,18 @@
           }
         });
 
-        map.on("moveend zoomend", () => {
-          const bounds = map.getBounds();
-          console.log("Map viewport:", {
-            zoom: map.getZoom(),
-            center: map.getCenter(),
-            north: bounds.getNorth(),
-            south: bounds.getSouth(),
-            east: bounds.getEast(),
-            west: bounds.getWest(),
-          });
-        });
 
         console.log("App initialized");
         setTimeout(() => map.invalidateSize(), 0);
-        window.addEventListener("resize", () => map.invalidateSize());
+        window.addEventListener("resize", () => {
+          map.invalidateSize();
+          if (typeof updateDetectionOverlay === "function") {
+            updateDetectionOverlay();
+          }
+          if (typeof updateDetectionInfoText === "function") {
+            updateDetectionInfoText();
+          }
+        });
 
         await loadDefaultPanorama();
       }
@@ -1348,6 +1344,37 @@
       // Store current detection context
       let currentDetectionContext = null;
 
+      function updateDetectionInfoText() {
+        const infoEl = document.getElementById("detectionInfo");
+        if (!infoEl) return;
+
+        if (!currentDetectionContext) {
+          infoEl.textContent = "";
+          return;
+        }
+
+        const parts = [currentDetectionContext.streetName || "Unknown street"];
+        if (Number.isFinite(currentDetectionContext.streetBearing)) {
+          parts.push(
+            `Road: ${Math.round(
+              normalizeBearingDegrees(currentDetectionContext.streetBearing),
+            )}°`,
+          );
+        }
+
+        const currentPov = detectionPanorama?.getPov?.();
+        const viewHeading = Number.isFinite(currentPov?.heading)
+          ? currentPov.heading
+          : currentDetectionContext.heading;
+        if (Number.isFinite(viewHeading)) {
+          parts.push(
+            `View: ${Math.round(normalizeBearingDegrees(viewHeading))}°`,
+          );
+        }
+
+        infoEl.textContent = parts.join(" • ");
+      }
+
       /**
        * Handle dot click - run detection and show results.
        */
@@ -1461,7 +1488,7 @@
           detectionPanorama?.getPano?.() || currentDetectionContext.panoId;
         const detectionEntry = {
           savedAt: Date.now(),
-          source: "ui-map",
+          source: "parksight",
           panoId: detectedPanoId,
           camera: {
             lat: cameraLat,
@@ -1491,13 +1518,12 @@
         if (!currentDetectionContext?.panoId) return;
 
         const statusEl = document.getElementById("detectionStatus");
-        document.getElementById("detectionInfo").textContent =
-          `${currentDetectionContext.streetName} • Heading: ${Math.round(currentDetectionContext.heading)}°`;
         initDetectionPanorama(
           currentDetectionContext.panoId,
           currentDetectionContext.heading,
           document.getElementById("detectionPanorama"),
         );
+        updateDetectionInfoText();
         statusEl.textContent = `Click "Detect" to scan (heading: ${Math.round(currentDetectionContext.heading)}°, v2)`;
       }
 

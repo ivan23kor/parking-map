@@ -269,6 +269,28 @@ function perpendicularDistanceMeters(point, segment) {
   return area2 / len;
 }
 
+async function getSvgPathMetrics(locator) {
+  return locator.evaluate((node) => {
+    const d = node.getAttribute("d") || "";
+    const matches = Array.from(
+      d.matchAll(/[ML]\s*(-?\d+(?:\.\d+)?)\s*(-?\d+(?:\.\d+)?)/g),
+    );
+    const points = matches.map(([, x, y]) => ({
+      x: Number(x),
+      y: Number(y),
+    }));
+    const xs = points.map((point) => point.x);
+    const ys = points.map((point) => point.y);
+
+    return {
+      d,
+      pointCount: points.length,
+      xSpan: xs.length ? Math.max(...xs) - Math.min(...xs) : 0,
+      ySpan: ys.length ? Math.max(...ys) - Math.min(...ys) : 0,
+    };
+  });
+}
+
 test.describe("detection flow", () => {
   test("builds preview crops with 25% extra vertical margin above and below the sign", async ({
     page,
@@ -292,6 +314,82 @@ test.describe("detection flow", () => {
 
     const expectedCropHeight = Math.round((8192 / 180) * 1 * 1.5);
     expect(cropPlan.requestBody.crop_height).toBe(expectedCropHeight);
+  });
+
+  test("keeps the first popup preview stable across reopen after refinement completes", async ({
+    page,
+  }) => {
+    await mockExternalDependencies(page);
+    await page.goto("/?api_key=test-key");
+
+    const primaryPreviewSrc = "data:image/jpeg;base64,PRIMARY_PREVIEW";
+    const refinedPreviewSrc = "data:image/jpeg;base64,REFINED_PREVIEW";
+
+    const previewState = await page.evaluate(
+      async ({ primaryPreviewSrc, refinedPreviewSrc }) => {
+        let previewCalls = 0;
+        fetchDetectionCropPreview = async () => {
+          previewCalls += 1;
+          return {
+            src: previewCalls === 1 ? primaryPreviewSrc : refinedPreviewSrc,
+          };
+        };
+        refinePreviewViewWithPanoramaDetection = async (sign, previewView) => {
+          sign.previewRefineAttempted = true;
+          sign.previewRefined = true;
+          return {
+            panoId: previewView.panoId,
+            detection: previewView.detection,
+          };
+        };
+
+        const sign = {
+          previewContainerId: "preview-fixture",
+          panoId: "mock-pano",
+          heading: 45,
+          pitch: -2,
+          angularWidth: 0.5,
+          angularHeight: 1,
+          confidence: 0.91,
+          class_name: "parking_sign",
+        };
+
+        const firstHost = document.createElement("div");
+        firstHost.innerHTML =
+          '<div class="sign-preview-popup" id="preview-fixture"></div>';
+        await loadSignPreview(sign, {
+          getElement() {
+            return firstHost;
+          },
+        });
+
+        const secondHost = document.createElement("div");
+        secondHost.innerHTML =
+          '<div class="sign-preview-popup" id="preview-fixture"></div>';
+        await loadSignPreview(sign, {
+          getElement() {
+            return secondHost;
+          },
+        });
+
+        return {
+          previewCalls,
+          previewSrc: sign.previewSrc,
+          refinedPreviewSrc: sign.previewRefinedSrc || null,
+          firstImageSrc:
+            firstHost.querySelector("img")?.getAttribute("src") || null,
+          secondImageSrc:
+            secondHost.querySelector("img")?.getAttribute("src") || null,
+        };
+      },
+      { primaryPreviewSrc, refinedPreviewSrc },
+    );
+
+    expect(previewState.previewCalls).toBe(2);
+    expect(previewState.previewSrc).toBe(primaryPreviewSrc);
+    expect(previewState.refinedPreviewSrc).toBe(refinedPreviewSrc);
+    expect(previewState.firstImageSrc).toBe(primaryPreviewSrc);
+    expect(previewState.secondImageSrc).toBe(primaryPreviewSrc);
   });
 
   test("falls back to single-view detection when panorama detection is unavailable", async ({
@@ -330,6 +428,61 @@ test.describe("detection flow", () => {
     );
     expect(stored).not.toBeNull();
     expect(stored.detections).toHaveLength(1);
+  });
+
+  test("renders a road-centerline guide on the panorama and reprojects it with POV changes", async ({
+    page,
+  }) => {
+    await mockExternalDependencies(page);
+
+    await page.addInitScript(() => {
+      window.__TEST_PANORAMA_POSITION = { lat: 42.3615, lng: -71.0921 };
+    });
+
+    await page.goto("/?api_key=test-key");
+    await expect(page.locator("#detectionStatus")).toContainText("Click \"Detect\"");
+
+    await page.evaluate(async () => {
+      currentPoints = [
+        {
+          lat: 42.3615,
+          lon: -71.0921,
+          bearing: 36.5,
+          oneway: null,
+          streetName: "Test Street",
+          segmentStart: { lat: 42.3610, lon: -71.0926 },
+          segmentEnd: { lat: 42.3620, lon: -71.0916 },
+        },
+      ];
+      currentPanoIds = ["mock-pano"];
+      await showDetectionForIndex(0);
+      detectionPanorama.setPov({ heading: 36.5, pitch: -6, zoom: 1.5 });
+      updateDetectionOverlay();
+      updateDetectionInfoText();
+    });
+
+    const roadGuide = page.locator("#detectionOverlay .road-guide-path");
+    await expect(roadGuide).toHaveCount(1);
+    const initialGuide = await getSvgPathMetrics(roadGuide);
+    expect(initialGuide.d).toBeTruthy();
+    expect(initialGuide.pointCount).toBeGreaterThan(10);
+    expect(initialGuide.xSpan).toBeGreaterThan(120);
+    expect(initialGuide.ySpan).toBeGreaterThan(initialGuide.xSpan * 1.2);
+    await expect(page.locator("#detectionInfo")).toContainText("Road: 37°");
+    await expect(page.locator("#detectionInfo")).toContainText("View: 37°");
+
+    await page.evaluate(() => {
+      detectionPanorama.setPov({ heading: 56.5, pitch: -6, zoom: 1.5 });
+      updateDetectionOverlay();
+      updateDetectionInfoText();
+    });
+
+    const updatedGuide = await getSvgPathMetrics(roadGuide);
+    expect(updatedGuide.d).toBeTruthy();
+    expect(updatedGuide.d).not.toEqual(initialGuide.d);
+    expect(updatedGuide.xSpan).toBeGreaterThan(100);
+    expect(updatedGuide.ySpan).toBeGreaterThan(updatedGuide.xSpan * 1.15);
+    await expect(page.locator("#detectionInfo")).toContainText("View: 57°");
   });
 
   test("projects signs along a curb line parallel to the selected street segment", async ({

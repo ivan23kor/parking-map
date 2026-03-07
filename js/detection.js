@@ -9,6 +9,7 @@ let currentDetections = []; // Store detections as {heading, pitch, angularWidth
 let detectionPov = { heading: 0, pitch: 0, zoom: 1 }; // POV when detection was run
 let povChangeListener = null;
 let panoChangeListener = null;
+let positionChangeListener = null;
 
 /**
  * Calculate FOV from Street View zoom level.
@@ -995,6 +996,8 @@ function updateDetectionOverlay() {
   // Clear existing boxes (but keep markers)
   overlay.querySelectorAll(":not(.sign-marker)").forEach((el) => el.remove());
 
+  renderRoadGuideOverlay(overlay, pov, fov, width, height);
+
   // Draw each detection if visible
   for (const det of currentDetections) {
     const screen = angularToScreen(
@@ -1115,11 +1118,20 @@ function initDetectionPanorama(panoId, heading, container) {
 
     povChangeListener = detectionPanorama.addListener(
       "pov_changed",
-      updateDetectionOverlay,
+      () => {
+        updateDetectionOverlay();
+        if (typeof updateDetectionInfoText === "function") {
+          updateDetectionInfoText();
+        }
+      },
     );
     panoChangeListener = detectionPanorama.addListener(
       "pano_changed",
       clearDetections,
+    );
+    positionChangeListener = detectionPanorama.addListener(
+      "position_changed",
+      updateDetectionOverlay,
     );
 
     // Track mouse position at document level (works over bounding boxes too)
@@ -1607,6 +1619,32 @@ const ROAD_EDGE_INSET_METERS = 0.35;
 const MIN_ROAD_EDGE_OFFSET_METERS = 2.4;
 const MAX_ROAD_EDGE_OFFSET_METERS = 6.2;
 const SIDE_INFERENCE_MIN_LATERAL_DEGREES = 28;
+// Keep the guide on the road plane so it coincides with the painted centerline.
+// Elevating it above ground introduces visible parallax and drifts it across the road.
+const ROAD_GUIDE_HEIGHT_METERS = 0.0;
+const ROAD_GUIDE_RANGE_METERS = 85;
+const ROAD_GUIDE_SAMPLE_STEP_METERS = 2;
+const ROAD_GUIDE_SCREEN_MARGIN_PX = 160;
+const ROAD_GUIDE_MAX_SCREEN_JUMP_PX = 240;
+const ROAD_GUIDE_MIN_CAMERA_CENTERLINE_OFFSET_METERS = 0.75;
+
+function createStreetFrameFromBearing(originLat, originLng, bearingDegrees) {
+  const bearingRad = (normalizeBearingDegrees(bearingDegrees) * Math.PI) / 180;
+  const alongUnit = {
+    x: Math.sin(bearingRad),
+    y: Math.cos(bearingRad),
+  };
+
+  return {
+    originLat,
+    originLng,
+    alongUnit,
+    rightUnit: {
+      x: alongUnit.y,
+      y: -alongUnit.x,
+    },
+  };
+}
 
 /**
  * Project a point from a start lat/lng by distance and bearing.
@@ -1808,31 +1846,67 @@ function inferDetectionSide(signHeading, trafficBearing, fallbackSide = "right")
   return Math.sin((delta * Math.PI) / 180) >= 0 ? "right" : "left";
 }
 
-function estimateRoadEdgeOffsetMeters(options = {}) {
-  const { lanes = null, highway = null } = options;
-  const parsedLanes =
-    typeof lanes === "string"
-      ? parseFloat(lanes.split(";")[0])
-      : Number.isFinite(lanes)
-        ? lanes
-        : null;
-
-  let laneCount = parsedLanes;
-  if (!(laneCount > 0)) {
-    laneCount =
-      ({
-        primary: 4,
-        secondary: 3,
-        tertiary: 2,
-        residential: 2,
-        unclassified: 2,
-      })[highway] || 2;
+function parseLaneCount(lanes) {
+  if (typeof lanes === "string") {
+    return parseFloat(lanes.split(";")[0]);
   }
+  if (Number.isFinite(lanes)) {
+    return lanes;
+  }
+  return null;
+}
+
+function getDefaultLaneCount(highway = null) {
+  return (
+    {
+      primary: 4,
+      secondary: 3,
+      tertiary: 2,
+      residential: 2,
+      unclassified: 2,
+    }[highway] || 2
+  );
+}
+
+function resolveLaneCount(options = {}) {
+  const parsedLaneCount = parseLaneCount(options.lanes);
+  if (parsedLaneCount > 0) {
+    return parsedLaneCount;
+  }
+  return getDefaultLaneCount(options.highway);
+}
+
+function isOnewayRoad(oneway = null) {
+  return oneway === "yes" || oneway === "1" || oneway === "-1" || oneway === true;
+}
+
+function estimateRoadEdgeOffsetMeters(options = {}) {
+  const laneCount = resolveLaneCount(options);
 
   return clamp(
     (laneCount * DEFAULT_LANE_WIDTH_METERS) / 2 - ROAD_EDGE_INSET_METERS,
     MIN_ROAD_EDGE_OFFSET_METERS,
     MAX_ROAD_EDGE_OFFSET_METERS,
+  );
+}
+
+function estimateSyntheticRoadCenterlineOffsetMeters(options = {}) {
+  if (isOnewayRoad(options.oneway)) {
+    return 0;
+  }
+
+  const laneCount = resolveLaneCount(options);
+  if (!(laneCount > 1)) {
+    return 0;
+  }
+
+  const laneCenterOffset =
+    estimateRoadEdgeOffsetMeters(options) - DEFAULT_LANE_WIDTH_METERS / 2;
+
+  return clamp(
+    laneCenterOffset,
+    DEFAULT_LANE_WIDTH_METERS * 0.35,
+    Math.max(DEFAULT_LANE_WIDTH_METERS * 1.25, MAX_ROAD_EDGE_OFFSET_METERS / 2),
   );
 }
 
@@ -1933,6 +2007,320 @@ function projectSignToCurbLine(
     trafficBearing,
     side: resolvedSide,
   };
+}
+
+function getCurrentPanoramaCameraPosition() {
+  const panoramaPosition = detectionPanorama?.getPosition?.();
+  const lat = panoramaPosition?.lat?.();
+  const lng = panoramaPosition?.lng?.();
+  if (Number.isFinite(lat) && Number.isFinite(lng)) {
+    return { lat, lng };
+  }
+
+  const pointIndex = currentDetectionContext?.pointIndex;
+  const sampledPoint =
+    pointIndex != null && Array.isArray(currentPoints)
+      ? currentPoints[pointIndex]
+      : null;
+  const sampledLng = sampledPoint?.lon ?? sampledPoint?.lng;
+  if (Number.isFinite(sampledPoint?.lat) && Number.isFinite(sampledLng)) {
+    return { lat: sampledPoint.lat, lng: sampledLng };
+  }
+
+  if (
+    typeof INITIAL_LOCATION !== "undefined" &&
+    Number.isFinite(INITIAL_LOCATION?.lat) &&
+    Number.isFinite(INITIAL_LOCATION?.lon)
+  ) {
+    return { lat: INITIAL_LOCATION.lat, lng: INITIAL_LOCATION.lon };
+  }
+
+  return null;
+}
+
+function resolveRoadGuideGeometry(cameraLat, cameraLng) {
+  if (!currentDetectionContext) {
+    return null;
+  }
+
+  const roadBearing = currentDetectionContext.streetBearing;
+  if (!Number.isFinite(roadBearing)) {
+    return null;
+  }
+
+  const segmentStart = currentDetectionContext.segmentStart || null;
+  const segmentEnd = currentDetectionContext.segmentEnd || null;
+  let frame = null;
+  let anchor = null;
+
+  if (segmentStart && segmentEnd) {
+    frame = getStreetFrame({ segmentStart, segmentEnd });
+    if (frame) {
+      anchor = getStreetCenterlineAnchor(cameraLat, cameraLng, {
+        segmentStart,
+        segmentEnd,
+      });
+    }
+  }
+
+  if (!frame || !anchor) {
+    const pointIndex = currentDetectionContext.pointIndex;
+    const sampledPoint =
+      pointIndex != null && Array.isArray(currentPoints)
+        ? currentPoints[pointIndex]
+        : null;
+    const anchorLat = sampledPoint?.lat ?? cameraLat;
+    const anchorLng = sampledPoint?.lon ?? sampledPoint?.lng ?? cameraLng;
+    if (!Number.isFinite(anchorLat) || !Number.isFinite(anchorLng)) {
+      return null;
+    }
+
+    frame = createStreetFrameFromBearing(anchorLat, anchorLng, roadBearing);
+    anchor = { lat: anchorLat, lng: anchorLng };
+  }
+
+  const anchorFrame = toStreetFrame(anchor.lat, anchor.lng, frame);
+  const cameraFrame = toStreetFrame(cameraLat, cameraLng, frame);
+
+  return {
+    frame,
+    roadBearing: normalizeBearingDegrees(roadBearing),
+    anchorFrame,
+    cameraFrame,
+    lateralOffsetMeters: cameraFrame.right - anchorFrame.right,
+  };
+}
+
+function projectWorldPointToScreen(
+  pointLat,
+  pointLng,
+  pointHeightMeters,
+  cameraLat,
+  cameraLng,
+  povHeading,
+  povPitch,
+  fov,
+  screenWidth,
+  screenHeight,
+) {
+  const local = latLngToLocalMeters(pointLat, pointLng, cameraLat, cameraLng);
+  const z = pointHeightMeters - SV_CAMERA_HEIGHT;
+  const magnitude = Math.sqrt(local.x * local.x + local.y * local.y + z * z);
+  if (magnitude <= 1e-6) {
+    return null;
+  }
+
+  return directionToScreen(
+    {
+      x: local.x / magnitude,
+      y: local.y / magnitude,
+      z: z / magnitude,
+    },
+    povHeading,
+    povPitch,
+    fov,
+    screenWidth,
+    screenHeight,
+  );
+}
+
+function isReasonableRoadGuideScreenPoint(point, width, height) {
+  if (!point) {
+    return false;
+  }
+
+  return (
+    point.x >= -ROAD_GUIDE_SCREEN_MARGIN_PX &&
+    point.x <= width + ROAD_GUIDE_SCREEN_MARGIN_PX &&
+    point.y >= -ROAD_GUIDE_SCREEN_MARGIN_PX &&
+    point.y <= height + ROAD_GUIDE_SCREEN_MARGIN_PX
+  );
+}
+
+function resolveRoadGuideFrameRight(geometry, pov) {
+  if (!geometry) {
+    return null;
+  }
+
+  const actualCenterlineOffsetMeters =
+    geometry.anchorFrame.right - geometry.cameraFrame.right;
+  if (
+    Math.abs(actualCenterlineOffsetMeters) >=
+    ROAD_GUIDE_MIN_CAMERA_CENTERLINE_OFFSET_METERS
+  ) {
+    return geometry.anchorFrame.right;
+  }
+
+  const syntheticCenterlineOffsetMeters =
+    estimateSyntheticRoadCenterlineOffsetMeters({
+      lanes: currentDetectionContext?.lanes || null,
+      highway: currentDetectionContext?.highway || null,
+      oneway: currentDetectionContext?.oneway || null,
+    });
+  if (!(syntheticCenterlineOffsetMeters > 0)) {
+    return geometry.anchorFrame.right;
+  }
+
+  const viewDelta = signedAngleDeltaDegrees(
+    normalizeBearingDegrees(pov.heading),
+    geometry.roadBearing,
+  );
+  const signedCenterlineOffsetMeters =
+    Math.abs(viewDelta) <= 90
+      ? -syntheticCenterlineOffsetMeters
+      : syntheticCenterlineOffsetMeters;
+
+  return geometry.cameraFrame.right + signedCenterlineOffsetMeters;
+}
+
+function buildRoadGuideScreenSegments(geometry, cameraLat, cameraLng, pov, fov, width, height) {
+  if (!geometry) {
+    return [];
+  }
+
+  const guideRight = resolveRoadGuideFrameRight(geometry, pov);
+  if (!Number.isFinite(guideRight)) {
+    return [];
+  }
+
+  const segments = [];
+  let currentSegment = [];
+  let previousPoint = null;
+
+  for (
+    let offset = -ROAD_GUIDE_RANGE_METERS;
+    offset <= ROAD_GUIDE_RANGE_METERS;
+    offset += ROAD_GUIDE_SAMPLE_STEP_METERS
+  ) {
+    const worldPoint = fromStreetFrame(
+      geometry.anchorFrame.along + offset,
+      guideRight,
+      geometry.frame,
+    );
+    const screenPoint = projectWorldPointToScreen(
+      worldPoint.lat,
+      worldPoint.lng,
+      ROAD_GUIDE_HEIGHT_METERS,
+      cameraLat,
+      cameraLng,
+      pov.heading,
+      pov.pitch,
+      fov,
+      width,
+      height,
+    );
+    const isVisible = isReasonableRoadGuideScreenPoint(screenPoint, width, height);
+    const screenJump =
+      previousPoint && screenPoint
+        ? Math.hypot(screenPoint.x - previousPoint.x, screenPoint.y - previousPoint.y)
+        : 0;
+
+    if (!isVisible || screenJump > ROAD_GUIDE_MAX_SCREEN_JUMP_PX) {
+      if (currentSegment.length >= 2) {
+        segments.push(currentSegment);
+      }
+      currentSegment = [];
+      previousPoint = null;
+      continue;
+    }
+
+    currentSegment.push(screenPoint);
+    previousPoint = screenPoint;
+  }
+
+  if (currentSegment.length >= 2) {
+    segments.push(currentSegment);
+  }
+
+  return segments;
+}
+
+function renderRoadGuideOverlay(overlay, pov, fov, width, height) {
+  if (!overlay || !currentDetectionContext) {
+    return;
+  }
+
+  const cameraPosition = getCurrentPanoramaCameraPosition();
+  if (!cameraPosition) {
+    return;
+  }
+
+  const geometry = resolveRoadGuideGeometry(
+    cameraPosition.lat,
+    cameraPosition.lng,
+  );
+  const segments = buildRoadGuideScreenSegments(
+    geometry,
+    cameraPosition.lat,
+    cameraPosition.lng,
+    pov,
+    fov,
+    width,
+    height,
+  );
+  if (segments.length === 0) {
+    return;
+  }
+
+  const buildPathData = (points) =>
+    points
+      .map((point, index) =>
+        `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`,
+      )
+      .join(" ");
+  const pathData = segments.map(buildPathData).join(" ");
+
+  const shadowPath = document.createElementNS(
+    "http://www.w3.org/2000/svg",
+    "path",
+  );
+  shadowPath.classList.add("road-guide-path-shadow");
+  shadowPath.setAttribute("d", pathData);
+  shadowPath.setAttribute("fill", "none");
+  shadowPath.setAttribute("stroke", "rgba(0, 0, 0, 0.55)");
+  shadowPath.setAttribute("stroke-width", "8");
+  shadowPath.setAttribute("stroke-linecap", "round");
+  shadowPath.setAttribute("stroke-linejoin", "round");
+  overlay.appendChild(shadowPath);
+
+  const roadGuidePath = document.createElementNS(
+    "http://www.w3.org/2000/svg",
+    "path",
+  );
+  roadGuidePath.classList.add("road-guide-path");
+  roadGuidePath.setAttribute("d", pathData);
+  roadGuidePath.setAttribute("fill", "none");
+  roadGuidePath.setAttribute("stroke", "#f59e0b");
+  roadGuidePath.setAttribute("stroke-width", "4");
+  roadGuidePath.setAttribute("stroke-linecap", "round");
+  roadGuidePath.setAttribute("stroke-linejoin", "round");
+  roadGuidePath.setAttribute("stroke-dasharray", "14 10");
+  overlay.appendChild(roadGuidePath);
+
+  const longestSegment = segments.reduce(
+    (best, segment) => (segment.length > (best?.length || 0) ? segment : best),
+    null,
+  );
+  if (!longestSegment) {
+    return;
+  }
+
+  const labelPoint = longestSegment[Math.floor(longestSegment.length / 2)];
+  const roadGuideLabel = document.createElementNS(
+    "http://www.w3.org/2000/svg",
+    "text",
+  );
+  roadGuideLabel.classList.add("road-guide-label");
+  roadGuideLabel.setAttribute("x", (labelPoint.x + 10).toFixed(2));
+  roadGuideLabel.setAttribute("y", Math.max(20, labelPoint.y - 10).toFixed(2));
+  roadGuideLabel.setAttribute("fill", "#fef3c7");
+  roadGuideLabel.setAttribute("font-size", "12");
+  roadGuideLabel.setAttribute("font-weight", "700");
+  roadGuideLabel.setAttribute("stroke", "rgba(0, 0, 0, 0.45)");
+  roadGuideLabel.setAttribute("stroke-width", "3");
+  roadGuideLabel.setAttribute("paint-order", "stroke");
+  roadGuideLabel.textContent = `Road centerline ${Math.round(geometry.roadBearing)}°`;
+  overlay.appendChild(roadGuideLabel);
 }
 
 /**

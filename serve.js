@@ -16,6 +16,7 @@ const MIME_TYPES = {
 
 const PORT = 8080;
 const API_KEY = process.env.GOOGLE_MAPS_API_KEY;
+const LEGACY_UI_PATHS = ['/ui-map', '/ui-panorama', '/ui-upload', '/dist'];
 
 const injectScript = API_KEY ? `
     <script>
@@ -25,7 +26,25 @@ const injectScript = API_KEY ? `
 ` : '';
 
 const server = http.createServer((req, res) => {
-    let filePath = '.' + req.url;
+    const requestUrl = new URL(req.url, `http://${req.headers.host || `127.0.0.1:${PORT}`}`);
+
+    if (
+        LEGACY_UI_PATHS.some((legacyPath) =>
+            requestUrl.pathname === legacyPath || requestUrl.pathname.startsWith(`${legacyPath}/`)
+        )
+    ) {
+        res.writeHead(404, {
+            'Content-Type': 'text/plain',
+            'Cache-Control': 'no-store',
+            'Clear-Site-Data': '"cache"',
+            Pragma: 'no-cache',
+            Expires: '0'
+        });
+        res.end('Not found');
+        return;
+    }
+
+    let filePath = '.' + decodeURIComponent(requestUrl.pathname);
     if (filePath === './') filePath = './index.html';
 
     // Handle directory requests - serve index.html
@@ -59,7 +78,14 @@ const server = http.createServer((req, res) => {
             content = content.toString().replace('</head>', injectScript + '</head>');
         }
 
-        res.writeHead(200, { 'Content-Type': contentType });
+        const headers = { 'Content-Type': contentType };
+        if (extname === '.html') {
+            headers['Cache-Control'] = 'no-store';
+            headers['Pragma'] = 'no-cache';
+            headers['Expires'] = '0';
+        }
+
+        res.writeHead(200, headers);
         res.end(content);
     });
 });
