@@ -242,6 +242,14 @@
             z-index: 101;
         }
 
+        .sign-marker-icon {
+            font-size: 20px;
+            line-height: 24px;
+            text-align: center;
+            background: none;
+            border: none;
+        }
+
         #detectionInfo {
             position: absolute;
             bottom: 20px;
@@ -714,10 +722,12 @@
             if (!point || !panoId) return;
 
             const side = document.getElementById('sideToggle').value;
-            const heading = calculateHeadingWithSide(point.bearing, side, point.oneway);
+            // Flip 180° to look behind the direction of travel
+            const rawHeading = calculateHeadingWithSide(point.bearing, side, point.oneway);
+            const heading = (rawHeading + 180) % 360;
 
-            // Store context for detection
-            currentDetectionContext = { panoId, heading };
+            // Store context for detection (pointIndex for position fallback)
+            currentDetectionContext = { panoId, heading, pointIndex: index };
 
             // Show detection modal
             const modal = document.getElementById('detectionModal');
@@ -772,28 +782,41 @@
         function plotDetectedSigns() {
             if (!detectionPanorama || currentDetections.length === 0) return;
 
-            // Get camera position from the panorama
+            // Get camera position: try panorama object first, fall back to stored point
+            let cameraLat, cameraLng;
             const pos = detectionPanorama.getPosition();
-            if (!pos) {
-                console.warn('Cannot plot signs: no panorama position');
+            if (pos) {
+                cameraLat = pos.lat();
+                cameraLng = pos.lng();
+            } else if (currentDetectionContext?.pointIndex != null) {
+                const pt = currentPoints[currentDetectionContext.pointIndex];
+                if (pt) {
+                    cameraLat = pt.lat;
+                    cameraLng = pt.lon;
+                }
+            }
+
+            if (cameraLat == null || cameraLng == null) {
+                console.warn('Cannot plot signs: no camera position available');
                 return;
             }
-            const cameraLat = pos.lat();
-            const cameraLng = pos.lng();
+
+            console.log(`Plotting ${currentDetections.length} signs from camera at (${cameraLat.toFixed(6)}, ${cameraLng.toFixed(6)})`);
 
             // Estimate real-world location for each detection
             const signLocations = estimateAllSignLocations(cameraLat, cameraLng);
 
+            const signIcon = L.divIcon({
+                className: 'sign-marker-icon',
+                html: '🅿️',
+                iconSize: [24, 24],
+                iconAnchor: [12, 12]
+            });
+
             for (const sign of signLocations) {
-                // Create sign marker (red/orange to distinguish from blue SV dots)
-                const marker = L.circleMarker([sign.lat, sign.lng], {
-                    radius: 8,
-                    fillColor: '#e53e3e',
-                    color: '#c53030',
-                    weight: 2,
-                    opacity: 0.9,
-                    fillOpacity: 0.8
-                }).addTo(signMarkersLayer);
+                // Create sign marker with icon for visibility
+                const marker = L.marker([sign.lat, sign.lng], { icon: signIcon })
+                    .addTo(signMarkersLayer);
 
                 const distLabel = sign.distance.toFixed(1);
                 const confLabel = (sign.confidence * 100).toFixed(0);
@@ -803,10 +826,10 @@
                     { permanent: false, direction: 'top' }
                 );
 
-                // Also draw a line from camera to sign
+                // Draw a line from camera to sign
                 L.polyline(
                     [[cameraLat, cameraLng], [sign.lat, sign.lng]],
-                    { color: '#e53e3e', weight: 1, opacity: 0.4, dashArray: '4,4' }
+                    { color: '#e53e3e', weight: 2, opacity: 0.5, dashArray: '4,4' }
                 ).addTo(signMarkersLayer);
 
                 console.log(
