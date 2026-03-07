@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageDraw
 from pydantic import BaseModel
 from ultralytics import YOLO
@@ -31,6 +32,7 @@ model = YOLO(str(MODEL_PATH))
 print(f"Model loaded. Classes: {model.names}")
 
 app = FastAPI(title="Parking Sign Detection API")
+app.mount("/detected-signs", StaticFiles(directory=str(DETECTED_SIGNS_DIR)), name="detected-signs")
 
 # CORS for frontend
 app.add_middleware(
@@ -413,14 +415,16 @@ async def crop_sign_tiles(request: CropSignTilesRequest):
                 if 0 <= y_line < crop_h:
                     draw.line([(cx - 8, y_line), (cx + 8, y_line)], fill='red', width=1)
     
+    should_save = request.save or request.include_image
     filename = None
-    if request.save:
+    if should_save:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{timestamp}_conf{request.confidence:.2f}.jpg"
         cropped.save(DETECTED_SIGNS_DIR / filename, quality=95)
 
     response = {
         "filename": filename,
+        "image_url": f"/detected-signs/{filename}" if filename else None,
         "width": x2 - x1,
         "height": y2 - y1,
         "tiles_fetched": len(request.tiles)
