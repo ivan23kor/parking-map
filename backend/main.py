@@ -79,7 +79,7 @@ class SignPreviewRequest(BaseModel):
     width: int = 320
     height: int = 640
     crop_width_ratio: float = 1 / 7
-    crop_height_ratio: float = 1 / 2
+    crop_height_ratio: float = 3 / 4
     save: bool = False
     include_image: bool = True
 
@@ -705,10 +705,9 @@ async def detect_file(file: UploadFile = File(...), confidence: float = 0.15):
     )
 
 
-@app.post("/detect-sahi", response_model=SahiResponse)
-async def detect_sahi(request: SahiRequest):
+async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
     """
-    Slicing Aided Hyper Inference (SAHI) for parking sign detection.
+    Panorama detection using overlapping higher-zoom windows.
 
     Slices the panorama view into overlapping higher-zoom windows,
     runs YOLO on each, converts detections to angular coordinates,
@@ -726,7 +725,7 @@ async def detect_sahi(request: SahiRequest):
         slice_heading = (start_heading + i * step) % 360
         slices.append(slice_heading)
 
-    print(f"SAHI: {num_slices} slices, FOV={request.slice_fov}°, "
+    print(f"Panorama detect: {num_slices} slices, FOV={request.slice_fov}°, "
           f"step={step:.1f}°, headings={[f'{h:.1f}' for h in slices]}")
 
     # Fetch all slice images in parallel
@@ -740,7 +739,7 @@ async def detect_sahi(request: SahiRequest):
             resp.raise_for_status()
             return heading, resp.content
         except httpx.HTTPError as e:
-            print(f"SAHI: Failed to fetch slice at heading {heading:.1f}°: {e}")
+            print(f"Panorama detect: failed to fetch slice at heading {heading:.1f}°: {e}")
             return heading, None
 
     async with httpx.AsyncClient() as client:
@@ -759,7 +758,7 @@ async def detect_sahi(request: SahiRequest):
             image = Image.open(io.BytesIO(image_bytes))
             img_w, img_h = image.size
         except Exception as e:
-            print(f"SAHI: Failed to load slice image at heading {slice_heading:.1f}°: {e}")
+            print(f"Panorama detect: failed to load slice image at heading {slice_heading:.1f}°: {e}")
             continue
 
         start_time = time.time()
@@ -813,18 +812,30 @@ async def detect_sahi(request: SahiRequest):
                     class_name=cls_name,
                 ))
 
-    print(f"SAHI: {len(all_angular_dets)} raw detections before NMS")
+    print(f"Panorama detect: {len(all_angular_dets)} raw detections before NMS")
 
     # NMS to merge overlapping detections from adjacent slices
     merged = nms_angular(all_angular_dets, request.nms_iou_threshold)
 
-    print(f"SAHI: {len(merged)} detections after NMS")
+    print(f"Panorama detect: {len(merged)} detections after NMS")
 
     return SahiResponse(
         detections=merged,
         total_inference_time_ms=round(total_inference_ms, 1),
         slices_count=num_slices,
     )
+
+
+@app.post("/detect-panorama", response_model=SahiResponse)
+async def detect_panorama(request: SahiRequest):
+    """Primary panorama detection endpoint used by the web app."""
+    return await detect_panorama_impl(request)
+
+
+@app.post("/detect-sahi", response_model=SahiResponse)
+async def detect_sahi(request: SahiRequest):
+    """Compatibility alias for the panorama detection endpoint."""
+    return await detect_panorama_impl(request)
 
 
 if __name__ == "__main__":
