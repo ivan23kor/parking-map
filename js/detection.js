@@ -1557,7 +1557,13 @@ function projectSignToCurbLine(
     sideSign * distanceMeters * Math.sin(headingDeltaRad);
 
   let alongStreetDistance = rawAlongStreetDistance;
-  if (rawLateralDistance > curbOffsetMeters + 0.25) {
+
+  // If the detection ray points back across the street, it never intersects
+  // the requested curb. Snap to the perpendicular curb projection instead of
+  // inventing a false offset along the block.
+  if (rawLateralDistance <= 0) {
+    alongStreetDistance = 0;
+  } else if (rawLateralDistance > curbOffsetMeters + 0.25) {
     alongStreetDistance *= curbOffsetMeters / rawLateralDistance;
   }
 

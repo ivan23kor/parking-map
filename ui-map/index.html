@@ -379,7 +379,7 @@
       let currentPanoIds = [];
       let latestRenderedSignMapData = null;
       const SIGN_MAP_STORAGE_KEY = "parksight_latest_sign_map_data";
-      const SIGN_MAP_PROJECTION_VERSION = 2;
+      const SIGN_MAP_PROJECTION_VERSION = 4;
       const INITIAL_LOCATION = { lat: 42.3615, lon: -71.0921 };
       const DEFAULT_SIDE = "right";
       const BASE_HEADING = 90;
@@ -1168,7 +1168,7 @@
         const signLocations = estimateAllSignLocations(cameraLat, cameraLng, {
           streetBearing: currentDetectionContext.streetBearing,
           oneway: currentDetectionContext.oneway,
-          side: currentDetectionContext.side,
+          side: getProjectionSide(currentDetectionContext.side),
         });
         const detectedPanoId =
           detectionPanorama?.getPano?.() || currentDetectionContext.panoId;
@@ -1201,6 +1201,10 @@
           document.getElementById("detectionPanorama"),
         );
         statusEl.textContent = `Click "Detect" to scan (heading: ${Math.round(currentDetectionContext.heading)}°, v2)`;
+      }
+
+      function getProjectionSide(viewSide) {
+        return viewSide === "left" ? "right" : "left";
       }
     </script>
   </body>
