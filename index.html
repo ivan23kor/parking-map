@@ -143,6 +143,17 @@
         border-radius: 4px;
         z-index: 101;
         max-width: calc(100% - 32px);
+        cursor: pointer;
+        user-select: none;
+        transition: background 0.2s ease;
+      }
+
+      #detectionStatus:hover {
+        background: rgba(0, 0, 0, 0.9);
+      }
+
+      #detectionStatus:active {
+        background: rgba(30, 64, 175, 0.9);
       }
 
       .sign-marker-icon {
