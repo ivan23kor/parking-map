@@ -1276,7 +1276,6 @@
 
         // Set up event handlers
         setupEventHandlers();
-        renderSignMapData(getLatestSignMapData());
 
         window.addEventListener("storage", (event) => {
           if (event.key === SIGN_MAP_STORAGE_KEY) {
@@ -1700,6 +1699,32 @@
       async function rerunDetection() {
         if (!currentDetectionContext || !detectionPanorama) return;
 
+        // Refresh road context if the panorama has moved to a different location
+        const currentPano = detectionPanorama.getPano();
+        const pos = detectionPanorama.getPosition?.();
+        const curLat = pos?.lat?.();
+        const curLng = pos?.lng?.();
+        if (
+          currentPano &&
+          currentPano !== currentDetectionContext.panoId &&
+          Number.isFinite(curLat) &&
+          Number.isFinite(curLng)
+        ) {
+          currentDetectionContext = {
+            ...currentDetectionContext,
+            panoId: currentPano,
+            // Clear stale road data so ensureDetectionRoadContext re-fetches
+            streetBearing: undefined,
+            segmentStart: null,
+            segmentEnd: null,
+            wayGeometry: null,
+            segmentIndex: null,
+            streetName: undefined,
+          };
+          await ensureDetectionRoadContext(curLat, curLng);
+          updateDetectionInfoText();
+        }
+
         const { panoId } = currentDetectionContext;
         const statusEl = document.getElementById("detectionStatus");
 
@@ -1786,6 +1811,50 @@
           signs: signLocations,
         };
 
+        // ── Calibration instrumentation ──
+        if (!window._calibrationLog) {
+          window._calibrationLog = [];
+        }
+        const calEntries = signLocations.map((s, i) => {
+          const det = currentDetections[i] || {};
+          return {
+            ts: new Date().toISOString(),
+            panoId: detectedPanoId,
+            cameraLat,
+            cameraLng,
+            signIdx: i,
+            heading: s.heading,
+            pitch: det.pitch,
+            angularHeight: det.angularHeight,
+            distanceAngularHeight: s.distanceAngularHeight,
+            sourceDetections: s.sourceDetections,
+            mergeStackFactor: s.mergeStackFactor,
+            estimatedDistance: s.distance,
+            method: s.method,
+            signLat: s.lat,
+            signLng: s.lng,
+            groundTruthDistance: null,
+            groundTruthLat: null,
+            groundTruthLng: null,
+          };
+        });
+        window._calibrationLog.push(...calEntries);
+        console.table(
+          calEntries.map((e) => ({
+            "#": e.signIdx,
+            heading: e.heading?.toFixed(1),
+            pitch: e.pitch?.toFixed(2),
+            angH: e.angularHeight?.toFixed(3),
+            distAngH: e.distanceAngularHeight?.toFixed(3),
+            estDist: e.estimatedDistance?.toFixed(2),
+            method: e.method,
+          })),
+        );
+        console.log(
+          `%c[Calibration] ${calEntries.length} sign(s) logged. Total log size: ${window._calibrationLog.length}`,
+          "color: #4ade80; font-weight: bold",
+        );
+
         const initialStore = appendSignMapDetection(detectionEntry);
         renderSignMapData(initialStore);
 
@@ -1818,6 +1887,203 @@
       function getProjectionSide(viewSide) {
         return viewSide === "left" ? "right" : "left";
       }
+
+      // ── Calibration helpers (call from DevTools console) ──
+
+      /**
+       * Mark ground-truth for a previously detected sign.
+       *
+       * Workflow:
+       *   1. Detect signs from pano A (auto-logged).
+       *   2. Navigate to the closest pano to a sign you want to calibrate.
+       *   3. Ctrl-hover over the sign to mark it (green crosshair, heading+pitch).
+       *   4. Run:  _markGroundTruth(signIndex)
+       *      signIndex = the sign's # from the detection table (0-based),
+       *      or negative offset from end of log (-1 = last sign logged).
+       *
+       * The ground-truth position is computed by projecting from the current
+       * pano point along the marked heading at the pitch-derived distance
+       * (camera height / tan(|pitch|)).  This is much more accurate than
+       * treating the pano capture point itself as the sign location.
+       *
+       * If no mark exists, falls back to the raw pano position (less accurate).
+       */
+      window._markGroundTruth = function (signIndex) {
+        const log = window._calibrationLog || [];
+        if (log.length === 0) {
+          console.warn("[Calibration] No entries logged yet. Run a detection first.");
+          return;
+        }
+        const idx = signIndex < 0 ? log.length + signIndex : signIndex;
+        const entry =
+          log.find((e, i) => i >= idx && e.signIdx === (signIndex < 0 ? log[log.length + signIndex]?.signIdx : signIndex)) ||
+          log[idx];
+        if (!entry) {
+          console.warn(`[Calibration] No entry at index ${signIndex}`);
+          return;
+        }
+
+        // Current pano position (the "close" pano point)
+        const pos = detectionPanorama?.getPosition?.();
+        const gtPanoLat = pos?.lat?.();
+        const gtPanoLng = pos?.lng?.();
+        if (!Number.isFinite(gtPanoLat) || !Number.isFinite(gtPanoLng)) {
+          console.warn("[Calibration] Could not determine current pano position.");
+          return;
+        }
+
+        // Check if there is a pending sign mark from Ctrl-click
+        const mark = pendingSignMark;
+        let gtLat, gtLng, gtDist, gtMethod;
+
+        // Ground-truth camera/sign heights for pitch-based projection
+        const GT_CAMERA_HEIGHT = 1.7;   // Street View camera effective height (m)
+        const GT_SIGN_FACE_HEIGHT = 2.2; // Typical parking sign face center (m)
+
+        if (mark && Number.isFinite(mark.heading) && Number.isFinite(mark.pitch) && Math.abs(mark.pitch) > 0.5) {
+          // Compute horizontal distance from pitch angle + known height difference
+          let verticalDelta;
+          if (mark.pitch > 0) {
+            // Looking up at sign face: sign is above camera
+            verticalDelta = GT_SIGN_FACE_HEIGHT - GT_CAMERA_HEIGHT; // 0.5m
+          } else {
+            // Looking down at sign base: sign base is below camera
+            verticalDelta = GT_CAMERA_HEIGHT;
+          }
+          const absPitchRad = Math.abs(mark.pitch) * Math.PI / 180;
+          const pitchDist = verticalDelta / Math.tan(absPitchRad);
+          const projected = projectLatLng(gtPanoLat, gtPanoLng, pitchDist, mark.heading);
+          gtLat = projected.lat;
+          gtLng = projected.lng;
+          gtDist = haversineDistanceMeters(entry.cameraLat, entry.cameraLng, gtLat, gtLng);
+          gtMethod = mark.pitch > 0 ? "mark+pitch-up" : "mark+pitch-down";
+
+          // Also record the close-pano distance for comparison
+          const panoDist = haversineDistanceMeters(entry.cameraLat, entry.cameraLng, gtPanoLat, gtPanoLng);
+
+          entry.gtMarkHeading = mark.heading;
+          entry.gtMarkPitch = mark.pitch;
+          entry.gtPitchDistance = pitchDist;
+          entry.gtPanoLat = gtPanoLat;
+          entry.gtPanoLng = gtPanoLng;
+          entry.gtPanoDistance = panoDist;
+
+          console.log(
+            `%c[Calibration] Using marked sign: heading=${mark.heading.toFixed(1)}° pitch=${mark.pitch.toFixed(2)}° (${mark.pitch > 0 ? "up, Δh=" + verticalDelta.toFixed(1) + "m" : "down, Δh=" + verticalDelta.toFixed(1) + "m"}) → pitch-dist=${pitchDist.toFixed(2)}m from close pano`,
+            "color: #a78bfa",
+          );
+
+          // Clear the pending mark so it doesn't interfere with the next pair
+          pendingSignMark = null;
+        } else {
+          // Fallback: use pano position directly (less accurate)
+          gtLat = gtPanoLat;
+          gtLng = gtPanoLng;
+          gtDist = haversineDistanceMeters(entry.cameraLat, entry.cameraLng, gtLat, gtLng);
+          gtMethod = "pano-only";
+
+          if (mark) {
+            console.warn("[Calibration] Mark exists but |pitch| too shallow (<= 0.5°) for distance. Using pano position.");
+          } else {
+            console.warn("[Calibration] No Ctrl-mark found. Using raw pano position. For better accuracy, Ctrl-hover the sign first.");
+          }
+        }
+
+        entry.groundTruthLat = gtLat;
+        entry.groundTruthLng = gtLng;
+        entry.groundTruthDistance = gtDist;
+        entry.groundTruthMethod = gtMethod;
+
+        const ratio = entry.estimatedDistance / gtDist;
+        console.log(
+          `%c[Calibration] Sign #${entry.signIdx}: estimated=${entry.estimatedDistance.toFixed(2)}m, ground-truth=${gtDist.toFixed(2)}m (${gtMethod}), ratio=${ratio.toFixed(3)}, method=${entry.method}`,
+          `color: ${Math.abs(ratio - 1) < 0.15 ? "#4ade80" : "#f87171"}; font-weight: bold`,
+        );
+        console.table({
+          estimated: entry.estimatedDistance.toFixed(2) + " m",
+          groundTruth: gtDist.toFixed(2) + " m",
+          ratio: ratio.toFixed(3),
+          error: ((ratio - 1) * 100).toFixed(1) + "%",
+          gtMethod,
+          angularHeight: entry.angularHeight?.toFixed(3) + "°",
+          distanceAngularHeight: entry.distanceAngularHeight?.toFixed(3) + "°",
+          pitch: entry.pitch?.toFixed(2) + "°",
+          method: entry.method,
+        });
+      };
+
+      /**
+       * Export calibration log as CSV (copy from console or save).
+       *   _exportCalibration()       — logs CSV to console
+       *   _exportCalibration(true)   — triggers file download
+       */
+      window._exportCalibration = function (download = false) {
+        const log = (window._calibrationLog || []).filter((e) => e.groundTruthDistance != null);
+        if (log.length === 0) {
+          console.warn("[Calibration] No ground-truth entries yet. Use _markGroundTruth(idx) first.");
+          return;
+        }
+        const cols = [
+          "ts", "panoId", "cameraLat", "cameraLng", "signIdx", "heading", "pitch",
+          "angularHeight", "distanceAngularHeight", "sourceDetections", "mergeStackFactor",
+          "estimatedDistance", "method", "signLat", "signLng",
+          "groundTruthLat", "groundTruthLng", "groundTruthDistance", "groundTruthMethod",
+          "gtPanoLat", "gtPanoLng", "gtPanoDistance",
+          "gtMarkHeading", "gtMarkPitch", "gtPitchDistance",
+        ];
+        const header = cols.join(",");
+        const rows = log.map((e) => cols.map((c) => e[c] ?? "").join(","));
+        const csv = [header, ...rows].join("\n");
+
+        if (download) {
+          const blob = new Blob([csv], { type: "text/csv" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `calibration_${new Date().toISOString().slice(0, 10)}.csv`;
+          a.click();
+          URL.revokeObjectURL(url);
+          console.log(`[Calibration] Downloaded ${log.length} entries.`);
+        } else {
+          console.log(csv);
+        }
+      };
+
+      /**
+       * Show summary stats for all ground-truthed entries.
+       */
+      window._calibrationSummary = function () {
+        const log = (window._calibrationLog || []).filter((e) => e.groundTruthDistance != null);
+        if (log.length === 0) {
+          console.warn("[Calibration] No ground-truth entries yet.");
+          return;
+        }
+        const ratios = log.map((e) => e.estimatedDistance / e.groundTruthDistance);
+        const mean = ratios.reduce((a, b) => a + b, 0) / ratios.length;
+        const sorted = [...ratios].sort((a, b) => a - b);
+        const med = sorted.length % 2 === 0
+          ? (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2
+          : sorted[Math.floor(sorted.length / 2)];
+        const byMethod = {};
+        log.forEach((e, i) => {
+          const m = e.method || "unknown";
+          if (!byMethod[m]) byMethod[m] = [];
+          byMethod[m].push(ratios[i]);
+        });
+
+        console.log(`%c[Calibration Summary] ${log.length} ground-truth entries`, "color: #60a5fa; font-weight: bold");
+        console.table({
+          count: log.length,
+          meanRatio: mean.toFixed(3),
+          medianRatio: med.toFixed(3),
+          minRatio: Math.min(...ratios).toFixed(3),
+          maxRatio: Math.max(...ratios).toFixed(3),
+        });
+        Object.entries(byMethod).forEach(([method, rs]) => {
+          const mMean = rs.reduce((a, b) => a + b, 0) / rs.length;
+          console.log(`  ${method}: n=${rs.length}, mean ratio=${mMean.toFixed(3)}`);
+        });
+      };
     </script>
   </body>
 </html>
