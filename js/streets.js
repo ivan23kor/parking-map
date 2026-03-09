@@ -110,7 +110,9 @@ function sampleStreetPoints(way, intervalMeters = 50) {
                 segmentEnd: {
                     lat: endNode.lat,
                     lon: endNode.lon
-                }
+                },
+                wayGeometry: nodes.map(n => ({ lat: n.lat, lon: n.lon })),
+                segmentIndex: i
             });
         }
     }
@@ -192,4 +194,94 @@ function clipStreetsToBounds(ways, bounds) {
     }
 
     return clippedWays;
+}
+
+function createBoundsAroundPoint(lat, lon, radiusMeters = 120) {
+    const latDelta = radiusMeters / 111320;
+    const lngDelta =
+        radiusMeters /
+        (111320 * Math.max(Math.cos((lat * Math.PI) / 180), 1e-6));
+
+    return {
+        getSouth: () => lat - latDelta,
+        getWest: () => lon - lngDelta,
+        getNorth: () => lat + latDelta,
+        getEast: () => lon + lngDelta
+    };
+}
+
+function toLocalMeters(lat, lon, originLat, originLon) {
+    const latScale = 111320;
+    const lngScale = 111320 * Math.cos((originLat * Math.PI) / 180);
+
+    return {
+        x: (lon - originLon) * lngScale,
+        y: (lat - originLat) * latScale
+    };
+}
+
+function distanceToSegmentMeters(point, start, end) {
+    const abx = end.x - start.x;
+    const aby = end.y - start.y;
+    const abLenSq = abx * abx + aby * aby;
+    if (abLenSq <= 1e-6) {
+        return Math.hypot(point.x - start.x, point.y - start.y);
+    }
+
+    const apx = point.x - start.x;
+    const apy = point.y - start.y;
+    const t = Math.max(0, Math.min(1, (apx * abx + apy * aby) / abLenSq));
+    const closestX = start.x + abx * t;
+    const closestY = start.y + aby * t;
+
+    return Math.hypot(point.x - closestX, point.y - closestY);
+}
+
+function findNearestStreetContext(lat, lon, ways) {
+    const point = { x: 0, y: 0 };
+    let nearest = null;
+
+    for (const way of ways) {
+        const nodes = way.geometry || [];
+        for (let i = 0; i < nodes.length - 1; i++) {
+            const segmentStart = nodes[i];
+            const segmentEnd = nodes[i + 1];
+            const start = toLocalMeters(segmentStart.lat, segmentStart.lon, lat, lon);
+            const end = toLocalMeters(segmentEnd.lat, segmentEnd.lon, lat, lon);
+            const distanceMeters = distanceToSegmentMeters(point, start, end);
+
+            if (nearest && distanceMeters >= nearest.distanceMeters) {
+                continue;
+            }
+
+            nearest = {
+                distanceMeters,
+                bearing: turf.bearing(
+                    turf.point([segmentStart.lon, segmentStart.lat]),
+                    turf.point([segmentEnd.lon, segmentEnd.lat])
+                ),
+                oneway: way.tags.oneway || null,
+                highway: way.tags.highway || null,
+                lanes: way.tags.lanes || null,
+                streetName: way.tags.name || 'Unknown street',
+                segmentStart: {
+                    lat: segmentStart.lat,
+                    lon: segmentStart.lon
+                },
+                segmentEnd: {
+                    lat: segmentEnd.lat,
+                    lon: segmentEnd.lon
+                },
+                wayGeometry: nodes.map(n => ({ lat: n.lat, lon: n.lon })),
+                segmentIndex: i
+            };
+        }
+    }
+
+    return nearest;
+}
+
+async function fetchNearestStreetContext(lat, lon, radiusMeters = 120) {
+    const ways = await fetchStreets(createBoundsAroundPoint(lat, lon, radiusMeters));
+    return findNearestStreetContext(lat, lon, ways);
 }
