@@ -513,7 +513,7 @@ test.describe("detection flow", () => {
     });
 
     await page.goto("/?api_key=test-key");
-    await expect(page.locator("#detectionStatus")).toContainText("Click \"Detect\"");
+    await expect(page.locator("#detectionStatus")).toContainText("Tap to detect");
 
     await page.evaluate(async () => {
       currentPoints = [
@@ -531,7 +531,7 @@ test.describe("detection flow", () => {
       await showDetectionForIndex(0);
     });
 
-    await page.locator("#redetectBtn").click();
+    await page.locator("#detectionStatus").click();
     await expect(page.locator("#detectionStatus")).toContainText("Found 2 parking signs");
 
     const stored = await page.evaluate(() =>
@@ -551,7 +551,7 @@ test.describe("detection flow", () => {
     });
 
     await page.goto("/?api_key=test-key");
-    await expect(page.locator("#detectionStatus")).toContainText("Click \"Detect\"");
+    await expect(page.locator("#detectionStatus")).toContainText("Tap to detect");
 
     await page.evaluate(async () => {
       currentPoints = [
@@ -569,7 +569,7 @@ test.describe("detection flow", () => {
       await showDetectionForIndex(0);
     });
 
-    await page.locator("#redetectBtn").click();
+    await page.locator("#detectionStatus").click();
     await expect(page.locator("#detectionStatus")).toContainText("Found 2 parking signs");
 
     const roadMarkers = await page.evaluate(() =>
@@ -597,7 +597,7 @@ test.describe("detection flow", () => {
     });
 
     await page.goto("/?api_key=test-key");
-    await expect(page.locator("#detectionStatus")).toContainText('Click "Detect"');
+    await expect(page.locator("#detectionStatus")).toContainText("Tap to detect");
 
     await page.evaluate(() => {
       fetchNearestStreetContext = async () => ({
@@ -619,7 +619,7 @@ test.describe("detection flow", () => {
       });
     });
 
-    await page.locator("#redetectBtn").click();
+    await page.locator("#detectionStatus").click();
     await expect(page.locator("#detectionStatus")).toContainText("Found 2 parking signs");
 
     const roadMarkers = await page.evaluate(() =>
@@ -675,7 +675,7 @@ test.describe("detection flow", () => {
     });
 
     await page.goto("/?api_key=test-key");
-    await expect(page.locator("#detectionStatus")).toContainText("Click \"Detect\"");
+    await expect(page.locator("#detectionStatus")).toContainText("Tap to detect");
 
     await page.evaluate(async () => {
       const wayGeometry = [
@@ -702,7 +702,7 @@ test.describe("detection flow", () => {
       await showDetectionForIndex(0);
     });
 
-    await page.locator("#redetectBtn").click();
+    await page.locator("#detectionStatus").click();
     await expect(page.locator("#detectionStatus")).toContainText("Found 2 parking signs");
 
     const projection = await page.evaluate(() =>
