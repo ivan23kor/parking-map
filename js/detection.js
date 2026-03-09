@@ -2303,7 +2303,8 @@ function projectSignToCurbLine(
   }
 
   const trafficBearing = getTrafficBearing(streetBearing, oneway);
-  const resolvedSide = inferDetectionSide(signHeading, trafficBearing, side);
+  // North America: parking signs are always on the driver's right-hand side.
+  const resolvedSide = "right";
   const edgeOffsetMeters =
     curbOffsetMeters ?? FIXED_SIGN_CENTERLINE_OFFSET_METERS;
   const centerlineAnchor = getStreetCenterlineAnchor(cameraLat, cameraLng, {
@@ -2813,7 +2814,7 @@ function estimateSignLocation(
  * @returns {Array} Array of estimated sign locations
  */
 function estimateAllSignLocations(cameraLat, cameraLng, options = null) {
-  return currentDetections
+  const results = currentDetections
     .map((det) => {
       const estimate = estimateSignLocation(cameraLat, cameraLng, det);
       if (!estimate) return null;
@@ -2855,6 +2856,8 @@ function estimateAllSignLocations(cameraLat, cameraLng, options = null) {
       };
     })
     .filter((loc) => loc !== null);
+
+  return results;
 }
 
 /**
