@@ -388,6 +388,7 @@
       const PREVIEW_ALT_IMPROVEMENT_RATIO = 0.92;
       const PREVIEW_REFINEMENT_FOV_MIN = 18;
       const PREVIEW_REFINEMENT_FOV_MAX = 40;
+      const DETECTION_ROAD_MARKER_HALF_LENGTH_METERS = 36;
 
       function normalizeSignMapStore(parsed) {
         if (!parsed) {
@@ -488,6 +489,261 @@
         signMarkersLayer.clearLayers();
       }
 
+      function hasDetectionRoadContext(context) {
+        if (!context) return false;
+
+        const hasWayGeometry =
+          Array.isArray(context.wayGeometry) && context.wayGeometry.length >= 2;
+        const hasSegment =
+          context.segmentStart &&
+          context.segmentEnd &&
+          Number.isFinite(context.streetBearing);
+
+        return hasWayGeometry || hasSegment;
+      }
+
+      async function ensureDetectionRoadContext(lat, lng) {
+        if (
+          hasDetectionRoadContext(currentDetectionContext) ||
+          !Number.isFinite(lat) ||
+          !Number.isFinite(lng)
+        ) {
+          return currentDetectionContext;
+        }
+
+        try {
+          const nearestStreet = await fetchNearestStreetContext(lat, lng);
+          if (!nearestStreet) {
+            return currentDetectionContext;
+          }
+
+          currentDetectionContext = {
+            ...currentDetectionContext,
+            streetBearing: Number.isFinite(nearestStreet.bearing)
+              ? nearestStreet.bearing
+              : currentDetectionContext?.streetBearing,
+            oneway: nearestStreet.oneway ?? currentDetectionContext?.oneway ?? null,
+            highway:
+              nearestStreet.highway ?? currentDetectionContext?.highway ?? null,
+            lanes: nearestStreet.lanes ?? currentDetectionContext?.lanes ?? null,
+            segmentStart:
+              nearestStreet.segmentStart ||
+              currentDetectionContext?.segmentStart ||
+              null,
+            segmentEnd:
+              nearestStreet.segmentEnd || currentDetectionContext?.segmentEnd || null,
+            wayGeometry:
+              nearestStreet.wayGeometry || currentDetectionContext?.wayGeometry || null,
+            segmentIndex:
+              nearestStreet.segmentIndex ??
+              currentDetectionContext?.segmentIndex ??
+              null,
+            streetName:
+              nearestStreet.streetName ||
+              currentDetectionContext?.streetName ||
+              "Unknown street",
+          };
+          updateDetectionInfoText();
+        } catch (err) {
+          console.warn("Failed to resolve street context for detection:", err);
+        }
+
+        return currentDetectionContext;
+      }
+
+      function resolveDetectionRoadBearing(detection) {
+        const segmentStart = detection?.segmentStart;
+        const segmentEnd = detection?.segmentEnd;
+        if (segmentStart && segmentEnd) {
+          return bearingBetweenPoints(
+            segmentStart.lat,
+            segmentStart.lon,
+            segmentEnd.lat,
+            segmentEnd.lon,
+          );
+        }
+
+        if (Number.isFinite(detection?.streetBearing)) {
+          return detection.streetBearing;
+        }
+
+        return null;
+      }
+
+      function buildDetectionRoadMarkerLatLngs(
+        detection,
+        halfLengthMeters = DETECTION_ROAD_MARKER_HALF_LENGTH_METERS,
+      ) {
+        if (!detection?.camera) {
+          return null;
+        }
+
+        const wayGeo = detection.wayGeometry;
+        if (Array.isArray(wayGeo) && wayGeo.length >= 2) {
+          return clipWayAroundCamera(
+            wayGeo,
+            detection.camera.lat,
+            detection.camera.lng,
+            halfLengthMeters,
+          );
+        }
+
+        const roadBearing = resolveDetectionRoadBearing(detection);
+        console.log("[centerline] fallback bearing:", roadBearing);
+        if (!Number.isFinite(roadBearing)) {
+          return null;
+        }
+
+        const start = projectLatLng(
+          detection.camera.lat,
+          detection.camera.lng,
+          halfLengthMeters,
+          normalizeBearingDegrees(roadBearing + 180),
+        );
+        const end = projectLatLng(
+          detection.camera.lat,
+          detection.camera.lng,
+          halfLengthMeters,
+          normalizeBearingDegrees(roadBearing),
+        );
+
+        return [
+          [start.lat, start.lng],
+          [end.lat, end.lng],
+        ];
+      }
+
+      function clipWayAroundCamera(wayGeo, camLat, camLng, halfLenM) {
+        let bestDist = Infinity;
+        let bestSegIdx = 0;
+        let bestT = 0;
+
+        for (let i = 0; i < wayGeo.length - 1; i++) {
+          const a = wayGeo[i];
+          const b = wayGeo[i + 1];
+          const result = closestPointOnSegment(camLat, camLng, a.lat, a.lon, b.lat, b.lon);
+          if (result.dist < bestDist) {
+            bestDist = result.dist;
+            bestSegIdx = i;
+            bestT = result.t;
+          }
+        }
+
+        const projLat = wayGeo[bestSegIdx].lat + bestT * (wayGeo[bestSegIdx + 1].lat - wayGeo[bestSegIdx].lat);
+        const projLon = wayGeo[bestSegIdx].lon + bestT * (wayGeo[bestSegIdx + 1].lon - wayGeo[bestSegIdx].lon);
+
+        const forwardPts = walkAlongWay(wayGeo, bestSegIdx, bestT, projLat, projLon, halfLenM, 1);
+        const backwardPts = walkAlongWay(wayGeo, bestSegIdx, bestT, projLat, projLon, halfLenM, -1);
+
+        const result = [];
+        for (let i = backwardPts.length - 1; i >= 0; i--) {
+          result.push([backwardPts[i].lat, backwardPts[i].lon]);
+        }
+        result.push([projLat, projLon]);
+        for (const p of forwardPts) {
+          result.push([p.lat, p.lon]);
+        }
+        return result;
+      }
+
+      function closestPointOnSegment(px, py, ax, ay, bx, by) {
+        const dx = bx - ax;
+        const dy = by - ay;
+        const lenSq = dx * dx + dy * dy;
+        if (lenSq < 1e-14) {
+          const d = Math.hypot(px - ax, py - ay);
+          return { t: 0, dist: d };
+        }
+        const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+        const cx = ax + t * dx;
+        const cy = ay + t * dy;
+        return { t, dist: Math.hypot(px - cx, py - cy) };
+      }
+
+      function walkAlongWay(wayGeo, segIdx, segT, startLat, startLon, maxMeters, direction) {
+        const pts = [];
+        let remaining = maxMeters;
+        let curLat = startLat;
+        let curLon = startLon;
+        let idx = segIdx;
+
+        if (direction > 0) {
+          const nextNode = wayGeo[idx + 1];
+          const d = haversineDistanceMeters(curLat, curLon, nextNode.lat, nextNode.lon);
+          if (d <= remaining) {
+            pts.push({ lat: nextNode.lat, lon: nextNode.lon });
+            remaining -= d;
+            curLat = nextNode.lat;
+            curLon = nextNode.lon;
+            idx++;
+          } else {
+            const frac = remaining / Math.max(d, 1e-6);
+            pts.push({
+              lat: curLat + frac * (nextNode.lat - curLat),
+              lon: curLon + frac * (nextNode.lon - curLon),
+            });
+            return pts;
+          }
+
+          while (idx < wayGeo.length - 1 && remaining > 0) {
+            const next = wayGeo[idx + 1];
+            const d2 = haversineDistanceMeters(curLat, curLon, next.lat, next.lon);
+            if (d2 <= remaining) {
+              pts.push({ lat: next.lat, lon: next.lon });
+              remaining -= d2;
+              curLat = next.lat;
+              curLon = next.lon;
+              idx++;
+            } else {
+              const frac = remaining / Math.max(d2, 1e-6);
+              pts.push({
+                lat: curLat + frac * (next.lat - curLat),
+                lon: curLon + frac * (next.lon - curLon),
+              });
+              break;
+            }
+          }
+        } else {
+          const prevNode = wayGeo[idx];
+          const d = haversineDistanceMeters(curLat, curLon, prevNode.lat, prevNode.lon);
+          if (d <= remaining) {
+            pts.push({ lat: prevNode.lat, lon: prevNode.lon });
+            remaining -= d;
+            curLat = prevNode.lat;
+            curLon = prevNode.lon;
+            idx--;
+          } else {
+            const frac = remaining / Math.max(d, 1e-6);
+            pts.push({
+              lat: curLat + frac * (prevNode.lat - curLat),
+              lon: curLon + frac * (prevNode.lon - curLon),
+            });
+            return pts;
+          }
+
+          while (idx >= 0 && remaining > 0) {
+            const prev = wayGeo[idx];
+            const d2 = haversineDistanceMeters(curLat, curLon, prev.lat, prev.lon);
+            if (d2 <= remaining) {
+              pts.push({ lat: prev.lat, lon: prev.lon });
+              remaining -= d2;
+              curLat = prev.lat;
+              curLon = prev.lon;
+              idx--;
+            } else {
+              const frac = remaining / Math.max(d2, 1e-6);
+              pts.push({
+                lat: curLat + frac * (prev.lat - curLat),
+                lon: curLon + frac * (prev.lon - curLon),
+              });
+              break;
+            }
+          }
+        }
+
+        return pts;
+      }
+
       function renderSignMapData(data) {
         latestRenderedSignMapData = data;
         signMarkersLayer.clearLayers();
@@ -507,6 +763,26 @@
 
         detections.forEach((detection, detectionIndex) => {
           if (!detection.camera) return;
+
+          const roadMarkerLatLngs = buildDetectionRoadMarkerLatLngs(detection);
+          if (roadMarkerLatLngs) {
+            L.polyline(roadMarkerLatLngs, {
+              color: "rgba(17, 24, 39, 0.45)",
+              weight: 6,
+              opacity: 0.9,
+              interactive: false,
+            }).addTo(signMarkersLayer);
+
+            L.polyline(roadMarkerLatLngs, {
+              color: "#f59e0b",
+              weight: 3,
+              opacity: 0.95,
+              dashArray: "10 8",
+              lineCap: "round",
+              lineJoin: "round",
+              interactive: false,
+            }).addTo(signMarkersLayer);
+          }
 
           const cameraCircle = L.circle(
             [detection.camera.lat, detection.camera.lng],
@@ -1410,6 +1686,8 @@
           lanes: point.lanes || null,
           segmentStart: point.segmentStart || null,
           segmentEnd: point.segmentEnd || null,
+          wayGeometry: point.wayGeometry || null,
+          segmentIndex: point.segmentIndex ?? null,
           streetName: point.streetName || "Unknown street",
         };
 
@@ -1475,17 +1753,20 @@
         const cameraLng = Number.isFinite(panoramaLng)
           ? panoramaLng
           : (sampledPoint?.lon ?? INITIAL_LOCATION.lon);
+        const roadContext =
+          (await ensureDetectionRoadContext(cameraLat, cameraLng)) ||
+          currentDetectionContext;
         const signLocations = estimateAllSignLocations(cameraLat, cameraLng, {
-          streetBearing: currentDetectionContext.streetBearing,
-          oneway: currentDetectionContext.oneway,
-          side: getProjectionSide(currentDetectionContext.side),
-          highway: currentDetectionContext.highway || null,
-          lanes: currentDetectionContext.lanes || null,
-          segmentStart: currentDetectionContext.segmentStart || null,
-          segmentEnd: currentDetectionContext.segmentEnd || null,
+          streetBearing: roadContext.streetBearing,
+          oneway: roadContext.oneway,
+          side: getProjectionSide(roadContext.side),
+          highway: roadContext.highway || null,
+          lanes: roadContext.lanes || null,
+          segmentStart: roadContext.segmentStart || null,
+          segmentEnd: roadContext.segmentEnd || null,
         });
         const detectedPanoId =
-          detectionPanorama?.getPano?.() || currentDetectionContext.panoId;
+          detectionPanorama?.getPano?.() || roadContext.panoId;
         const detectionEntry = {
           savedAt: Date.now(),
           source: "parksight",
@@ -1494,7 +1775,12 @@
             lat: cameraLat,
             lng: cameraLng,
           },
-          streetName: currentDetectionContext.streetName,
+          streetBearing: roadContext.streetBearing,
+          segmentStart: roadContext.segmentStart || null,
+          segmentEnd: roadContext.segmentEnd || null,
+          wayGeometry: roadContext.wayGeometry || null,
+          segmentIndex: roadContext.segmentIndex ?? null,
+          streetName: roadContext.streetName,
           signs: signLocations,
         };
 
