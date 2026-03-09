@@ -5,7 +5,7 @@
 
 // Detection state
 let detectionPanorama = null;
-let currentDetections = []; // Store detections as {heading, pitch, angularWidth, angularHeight, confidence, class_name}
+let currentDetections = []; // Store detections as {heading, pitch, angularWidth, angularHeight, distanceAngularHeight, confidence, class_name}
 let detectionPov = { heading: 0, pitch: 0, zoom: 1 }; // POV when detection was run
 let povChangeListener = null;
 let panoChangeListener = null;
@@ -141,6 +141,7 @@ function mergeAngularDetections(detections) {
     return [];
   }
 
+  const normalizedDetections = detections.map(normalizeAngularDetection);
   let heading = detections[0].heading;
   let pitch = detections[0].pitch;
   let minPitch = detections[0].pitch - detections[0].angularHeight / 2;
@@ -176,15 +177,47 @@ function mergeAngularDetections(detections) {
     }
   }
 
-  return {
+  const mergedAngularWidth = maxHeadingOffset - minHeadingOffset;
+  const mergedAngularHeight = maxPitch - minPitch;
+  const representativeHeights = normalizedDetections
+    .map((det) => det.distanceAngularHeight)
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const representativeWidths = normalizedDetections
+    .map((det) => det.distanceAngularWidth)
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const representativeHeight =
+    median(representativeHeights) ?? mergedAngularHeight;
+  const representativeWidth =
+    median(representativeWidths) ?? mergedAngularWidth;
+  const heightExpansion = mergedAngularHeight / Math.max(representativeHeight, 0.05);
+  const widthExpansion = mergedAngularWidth / Math.max(representativeWidth, 0.05);
+  const mergeStackFactor = clamp(
+    (heightExpansion - widthExpansion - MERGED_DISTANCE_HEIGHT_BIAS_FLOOR) /
+      MERGED_DISTANCE_HEIGHT_BIAS_RANGE,
+    0,
+    1,
+  );
+  const distanceAngularHeight =
+    mergedAngularHeight * (1 - mergeStackFactor) +
+    representativeHeight * mergeStackFactor;
+
+  return normalizeAngularDetection({
     heading,
     pitch,
-    angularWidth: maxHeadingOffset - minHeadingOffset,
-    angularHeight: maxPitch - minPitch,
+    angularWidth: mergedAngularWidth,
+    angularHeight: mergedAngularHeight,
     confidence,
     class_name: className,
-    sourceDetections: detections.length,
-  };
+    sourceDetections: normalizedDetections.reduce(
+      (sum, det) => sum + (det.sourceDetections || 1),
+      0,
+    ),
+    sourceMedianAngularHeight: representativeHeight,
+    sourceMedianAngularWidth: representativeWidth,
+    distanceAngularHeight,
+    distanceAngularWidth: representativeWidth,
+    mergeStackFactor,
+  });
 }
 
 function shouldClusterAngularDetections(a, b) {
@@ -219,8 +252,12 @@ function shouldClusterAngularDetections(a, b) {
 }
 
 function clusterAngularDetections(detections) {
-  if (!Array.isArray(detections) || detections.length <= 1) {
-    return detections || [];
+  if (!Array.isArray(detections) || detections.length === 0) {
+    return [];
+  }
+
+  if (detections.length === 1) {
+    return detections.map(normalizeAngularDetection);
   }
 
   const remaining = [...detections].sort((a, b) => b.confidence - a.confidence);
@@ -249,7 +286,9 @@ function clusterAngularDetections(detections) {
     clusters.push(mergeAngularDetections(cluster));
   }
 
-  return clusters.sort((a, b) => b.confidence - a.confidence);
+  return clusters
+    .sort((a, b) => b.confidence - a.confidence)
+    .map(normalizeAngularDetection);
 }
 
 /**
@@ -1618,6 +1657,7 @@ const DEFAULT_LANE_WIDTH_METERS = 3.2;
 const ROAD_EDGE_INSET_METERS = 0.35;
 const MIN_ROAD_EDGE_OFFSET_METERS = 2.4;
 const MAX_ROAD_EDGE_OFFSET_METERS = 6.2;
+const FIXED_SIGN_CENTERLINE_OFFSET_METERS = 3.1;
 const SIDE_INFERENCE_MIN_LATERAL_DEGREES = 28;
 // Keep the guide on the road plane so it coincides with the painted centerline.
 // Elevating it above ground introduces visible parallax and drifts it across the road.
@@ -1627,6 +1667,53 @@ const ROAD_GUIDE_SAMPLE_STEP_METERS = 2;
 const ROAD_GUIDE_SCREEN_MARGIN_PX = 160;
 const ROAD_GUIDE_MAX_SCREEN_JUMP_PX = 240;
 const ROAD_GUIDE_MIN_CAMERA_CENTERLINE_OFFSET_METERS = 0.75;
+const MERGED_DISTANCE_HEIGHT_BIAS_FLOOR = 0.1;
+const MERGED_DISTANCE_HEIGHT_BIAS_RANGE = 1.15;
+
+function median(values) {
+  if (!Array.isArray(values) || values.length === 0) {
+    return null;
+  }
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    return (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+  return sorted[mid];
+}
+
+function normalizeAngularDetection(detection) {
+  if (!detection) {
+    return detection;
+  }
+
+  return {
+    ...detection,
+    sourceDetections:
+      Number.isFinite(detection.sourceDetections) && detection.sourceDetections > 0
+        ? detection.sourceDetections
+        : 1,
+    distanceAngularHeight:
+      Number.isFinite(detection.distanceAngularHeight) &&
+      detection.distanceAngularHeight > 0
+        ? detection.distanceAngularHeight
+        : detection.angularHeight,
+    distanceAngularWidth:
+      Number.isFinite(detection.distanceAngularWidth) &&
+      detection.distanceAngularWidth > 0
+        ? detection.distanceAngularWidth
+        : detection.angularWidth,
+    mergeStackFactor:
+      Number.isFinite(detection.mergeStackFactor) && detection.mergeStackFactor >= 0
+        ? detection.mergeStackFactor
+        : 0,
+  };
+}
+
+function resolveDetectionDistanceAngularHeight(detection) {
+  return normalizeAngularDetection(detection)?.distanceAngularHeight;
+}
 
 function createStreetFrameFromBearing(originLat, originLng, bearingDegrees) {
   const bearingRad = (normalizeBearingDegrees(bearingDegrees) * Math.PI) / 180;
@@ -1729,6 +1816,290 @@ function localMetersToLatLng(x, y, originLat, originLng) {
   return {
     lat: originLat + y / latScale,
     lng: originLng + x / lngScale,
+  };
+}
+
+function toRadians(degrees) {
+  return (degrees * Math.PI) / 180;
+}
+
+function haversineDistanceMeters(lat1, lng1, lat2, lng2) {
+  const dLat = toRadians(lat2 - lat1);
+  const dLng = toRadians(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRadians(lat1)) *
+      Math.cos(toRadians(lat2)) *
+      Math.sin(dLng / 2) *
+      Math.sin(dLng / 2);
+  return (
+    2 *
+    EARTH_RADIUS_METERS *
+    Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+  );
+}
+
+function bearingBetweenPoints(lat1, lng1, lat2, lng2) {
+  const phi1 = toRadians(lat1);
+  const phi2 = toRadians(lat2);
+  const lambda = toRadians(lng2 - lng1);
+  const y = Math.sin(lambda) * Math.cos(phi2);
+  const x =
+    Math.cos(phi1) * Math.sin(phi2) -
+    Math.sin(phi1) * Math.cos(phi2) * Math.cos(lambda);
+  return normalizeBearingDegrees((Math.atan2(y, x) * 180) / Math.PI);
+}
+
+function getWayNodeLng(node) {
+  return node?.lon ?? node?.lng ?? null;
+}
+
+function hasWayGeometry(wayGeometry) {
+  return Array.isArray(wayGeometry) && wayGeometry.length >= 2;
+}
+
+function getWaySegment(wayGeometry, segmentIndex) {
+  if (!hasWayGeometry(wayGeometry)) {
+    return null;
+  }
+
+  if (
+    !Number.isInteger(segmentIndex) ||
+    segmentIndex < 0 ||
+    segmentIndex >= wayGeometry.length - 1
+  ) {
+    return null;
+  }
+
+  const start = wayGeometry[segmentIndex];
+  const end = wayGeometry[segmentIndex + 1];
+  const startLng = getWayNodeLng(start);
+  const endLng = getWayNodeLng(end);
+  if (
+    !Number.isFinite(start?.lat) ||
+    !Number.isFinite(startLng) ||
+    !Number.isFinite(end?.lat) ||
+    !Number.isFinite(endLng)
+  ) {
+    return null;
+  }
+
+  return {
+    start: { lat: start.lat, lng: startLng },
+    end: { lat: end.lat, lng: endLng },
+  };
+}
+
+function getWaySegmentBearing(wayGeometry, segmentIndex, fallbackBearing = null) {
+  const segmentCandidates = [segmentIndex, segmentIndex - 1, segmentIndex + 1];
+  for (const candidate of segmentCandidates) {
+    const segment = getWaySegment(wayGeometry, candidate);
+    if (!segment) {
+      continue;
+    }
+
+    const segmentLength = haversineDistanceMeters(
+      segment.start.lat,
+      segment.start.lng,
+      segment.end.lat,
+      segment.end.lng,
+    );
+    if (segmentLength <= 0.05) {
+      continue;
+    }
+
+    return bearingBetweenPoints(
+      segment.start.lat,
+      segment.start.lng,
+      segment.end.lat,
+      segment.end.lng,
+    );
+  }
+
+  return fallbackBearing;
+}
+
+function orientBearingToMatch(referenceBearing, candidateBearing) {
+  if (!Number.isFinite(candidateBearing)) {
+    return referenceBearing;
+  }
+
+  if (!Number.isFinite(referenceBearing)) {
+    return normalizeBearingDegrees(candidateBearing);
+  }
+
+  return Math.abs(signedAngleDeltaDegrees(candidateBearing, referenceBearing)) <= 90
+    ? normalizeBearingDegrees(candidateBearing)
+    : normalizeBearingDegrees(candidateBearing + 180);
+}
+
+function projectPointOntoWayGeometry(
+  lat,
+  lng,
+  wayGeometry,
+  preferredSegmentIndex = null,
+) {
+  if (!hasWayGeometry(wayGeometry) || !Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return null;
+  }
+
+  const segmentOrder = [];
+  if (
+    Number.isInteger(preferredSegmentIndex) &&
+    preferredSegmentIndex >= 0 &&
+    preferredSegmentIndex < wayGeometry.length - 1
+  ) {
+    segmentOrder.push(preferredSegmentIndex);
+  }
+
+  for (let i = 0; i < wayGeometry.length - 1; i += 1) {
+    if (i !== preferredSegmentIndex) {
+      segmentOrder.push(i);
+    }
+  }
+
+  let best = null;
+  for (const segmentIndex of segmentOrder) {
+    const segment = getWaySegment(wayGeometry, segmentIndex);
+    if (!segment) {
+      continue;
+    }
+
+    const start = latLngToLocalMeters(
+      segment.start.lat,
+      segment.start.lng,
+      lat,
+      lng,
+    );
+    const end = latLngToLocalMeters(
+      segment.end.lat,
+      segment.end.lng,
+      lat,
+      lng,
+    );
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq <= 1e-6) {
+      continue;
+    }
+
+    const t = clamp((-(start.x * dx + start.y * dy)) / lenSq, 0, 1);
+    const projectedX = start.x + dx * t;
+    const projectedY = start.y + dy * t;
+    const distanceMeters = Math.hypot(projectedX, projectedY);
+
+    if (best && distanceMeters >= best.distanceMeters) {
+      continue;
+    }
+
+    const projected = localMetersToLatLng(projectedX, projectedY, lat, lng);
+    best = {
+      lat: projected.lat,
+      lng: projected.lng,
+      segmentIndex,
+      t,
+      distanceMeters,
+    };
+  }
+
+  return best;
+}
+
+function walkWayGeometryByDistance(wayGeometry, anchor, signedDistanceMeters) {
+  if (!anchor || !hasWayGeometry(wayGeometry) || !Number.isFinite(signedDistanceMeters)) {
+    return null;
+  }
+
+  let remaining = Math.abs(signedDistanceMeters);
+  let segmentIndex = clamp(anchor.segmentIndex ?? 0, 0, wayGeometry.length - 2);
+  let currentLat = anchor.lat;
+  let currentLng = anchor.lng;
+
+  if (remaining <= 1e-6) {
+    return {
+      lat: currentLat,
+      lng: currentLng,
+      segmentIndex,
+    };
+  }
+
+  if (signedDistanceMeters >= 0) {
+    while (segmentIndex < wayGeometry.length - 1) {
+      const nextNode = wayGeometry[segmentIndex + 1];
+      const nextLng = getWayNodeLng(nextNode);
+      if (!Number.isFinite(nextNode?.lat) || !Number.isFinite(nextLng)) {
+        if (segmentIndex >= wayGeometry.length - 2) {
+          break;
+        }
+        segmentIndex += 1;
+        continue;
+      }
+
+      const segmentDistance = haversineDistanceMeters(
+        currentLat,
+        currentLng,
+        nextNode.lat,
+        nextLng,
+      );
+      if (segmentDistance >= remaining) {
+        const fraction = remaining / Math.max(segmentDistance, 1e-6);
+        return {
+          lat: currentLat + (nextNode.lat - currentLat) * fraction,
+          lng: currentLng + (nextLng - currentLng) * fraction,
+          segmentIndex,
+        };
+      }
+
+      remaining -= segmentDistance;
+      currentLat = nextNode.lat;
+      currentLng = nextLng;
+      if (segmentIndex >= wayGeometry.length - 2) {
+        break;
+      }
+      segmentIndex += 1;
+    }
+  } else {
+    while (segmentIndex >= 0) {
+      const prevNode = wayGeometry[segmentIndex];
+      const prevLng = getWayNodeLng(prevNode);
+      if (!Number.isFinite(prevNode?.lat) || !Number.isFinite(prevLng)) {
+        if (segmentIndex <= 0) {
+          break;
+        }
+        segmentIndex -= 1;
+        continue;
+      }
+
+      const segmentDistance = haversineDistanceMeters(
+        currentLat,
+        currentLng,
+        prevNode.lat,
+        prevLng,
+      );
+      if (segmentDistance >= remaining) {
+        const fraction = remaining / Math.max(segmentDistance, 1e-6);
+        return {
+          lat: currentLat + (prevNode.lat - currentLat) * fraction,
+          lng: currentLng + (prevLng - currentLng) * fraction,
+          segmentIndex,
+        };
+      }
+
+      remaining -= segmentDistance;
+      currentLat = prevNode.lat;
+      currentLng = prevLng;
+      if (segmentIndex <= 0) {
+        break;
+      }
+      segmentIndex -= 1;
+    }
+  }
+
+  return {
+    lat: currentLat,
+    lng: currentLng,
+    segmentIndex: clamp(segmentIndex, 0, wayGeometry.length - 2),
   };
 }
 
@@ -1922,6 +2293,8 @@ function projectSignToCurbLine(
     side = "right",
     oneway = null,
     curbOffsetMeters = null,
+    wayGeometry = null,
+    segmentIndex = null,
     segmentStart = null,
     segmentEnd = null,
     lanes = null,
@@ -1934,7 +2307,7 @@ function projectSignToCurbLine(
   const trafficBearing = getTrafficBearing(streetBearing, oneway);
   const resolvedSide = inferDetectionSide(signHeading, trafficBearing, side);
   const edgeOffsetMeters =
-    curbOffsetMeters ?? estimateRoadEdgeOffsetMeters({ lanes, highway });
+    curbOffsetMeters ?? FIXED_SIGN_CENTERLINE_OFFSET_METERS;
   const centerlineAnchor = getStreetCenterlineAnchor(cameraLat, cameraLng, {
     segmentStart,
     segmentEnd,
@@ -1947,6 +2320,60 @@ function projectSignToCurbLine(
     -distanceMeters,
     distanceMeters,
   );
+
+  if (hasWayGeometry(wayGeometry)) {
+    const anchor =
+      projectPointOntoWayGeometry(cameraLat, cameraLng, wayGeometry, segmentIndex) ||
+      projectPointOntoWayGeometry(
+        centerlineAnchor.lat,
+        centerlineAnchor.lng,
+        wayGeometry,
+        segmentIndex,
+      );
+    if (anchor) {
+      const anchorBearing = getWaySegmentBearing(
+        wayGeometry,
+        anchor.segmentIndex,
+        trafficBearing,
+      );
+      const walkDirectionSign =
+        Math.abs(signedAngleDeltaDegrees(anchorBearing, trafficBearing)) <= 90
+          ? 1
+          : -1;
+      const roadPoint = walkWayGeometryByDistance(
+        wayGeometry,
+        anchor,
+        alongStreetDistance * walkDirectionSign,
+      );
+      if (roadPoint) {
+        const localTrafficBearing = orientBearingToMatch(
+          trafficBearing,
+          getWaySegmentBearing(wayGeometry, roadPoint.segmentIndex, anchorBearing),
+        );
+        const lateralBearing =
+          resolvedSide === "left"
+            ? localTrafficBearing - 90
+            : localTrafficBearing + 90;
+        const snapped = projectLatLng(
+          roadPoint.lat,
+          roadPoint.lng,
+          edgeOffsetMeters,
+          lateralBearing,
+        );
+
+        return {
+          lat: snapped.lat,
+          lng: snapped.lng,
+          alongStreetDistance,
+          rawAlongStreetDistance,
+          curbOffsetMeters: edgeOffsetMeters,
+          trafficBearing: localTrafficBearing,
+          side: resolvedSide,
+        };
+      }
+    }
+  }
+
   const frame = getStreetFrame({ segmentStart, segmentEnd });
 
   if (!frame) {
@@ -1977,31 +2404,13 @@ function projectSignToCurbLine(
   const cameraFrame = toStreetFrame(cameraLat, cameraLng, frame);
   const cameraAlong = cameraFrame.along;
   const targetRight = resolvedSide === "left" ? -edgeOffsetMeters : edgeOffsetMeters;
-  const signHeadingRad = (normalizeBearingDegrees(signHeading) * Math.PI) / 180;
-  const headingVector = {
-    x: Math.sin(signHeadingRad),
-    y: Math.cos(signHeadingRad),
-  };
-  const rayAlong =
-    headingVector.x * frame.alongUnit.x + headingVector.y * frame.alongUnit.y;
-  const rayRight =
-    headingVector.x * frame.rightUnit.x + headingVector.y * frame.rightUnit.y;
-  let snappedAlong = cameraAlong + alongStreetDistance;
-
-  if (Math.abs(rayRight) > 0.035) {
-    const rayDistanceToEdge = (targetRight - cameraFrame.right) / rayRight;
-    const maxRayDistance = Math.max(distanceMeters * 2.25, distanceMeters + 10);
-    if (rayDistanceToEdge > 0.5 && rayDistanceToEdge <= maxRayDistance) {
-      snappedAlong = cameraAlong + rayAlong * rayDistanceToEdge;
-    }
-  }
-
+  const snappedAlong = cameraAlong + alongStreetDistance;
   const snapped = fromStreetFrame(snappedAlong, targetRight, frame);
 
   return {
     lat: snapped.lat,
     lng: snapped.lng,
-    alongStreetDistance: snappedAlong - cameraAlong,
+    alongStreetDistance,
     rawAlongStreetDistance,
     curbOffsetMeters: edgeOffsetMeters,
     trafficBearing,
@@ -2371,18 +2780,19 @@ function estimateSignLocation(
   detection,
   cameraHeight = SV_CAMERA_HEIGHT,
 ) {
+  const distanceAngularHeight = resolveDetectionDistanceAngularHeight(detection);
   const pitchDistance = estimateDistanceFromPitch(
     detection.pitch,
     cameraHeight,
   );
-  const sizeDistance = estimateDistanceFromAngularSize(detection.angularHeight);
+  const sizeDistance = estimateDistanceFromAngularSize(distanceAngularHeight);
 
   let distance = sizeDistance;
   let method = "size";
 
   if (pitchDistance != null) {
     const farSignWeight = clamp(
-      (3.5 - clamp(detection.angularHeight || 0, 0.6, 25)) / 3,
+      (3.5 - clamp(distanceAngularHeight || 0, 0.6, 25)) / 3,
       0,
       1,
     );
@@ -2401,6 +2811,7 @@ function estimateSignLocation(
     heading: detection.heading,
     confidence: detection.confidence,
     class_name: detection.class_name,
+    distanceAngularHeight,
     method,
   };
 }
@@ -2432,7 +2843,10 @@ function estimateAllSignLocations(cameraLat, cameraLng, options = null) {
         panoId: currentDetectionContext?.panoId || null,
         angularWidth: det.angularWidth,
         angularHeight: det.angularHeight,
+        distanceAngularHeight: resolveDetectionDistanceAngularHeight(det),
         pitch: det.pitch,
+        sourceDetections: det.sourceDetections || 1,
+        mergeStackFactor: det.mergeStackFactor || 0,
       };
 
       if (!curbAligned) {
