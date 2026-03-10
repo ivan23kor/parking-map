@@ -28,6 +28,9 @@ const TILE_GRID_WIDTH = 32 * TILE_SIZE; // 16384
 const TILE_GRID_HEIGHT = 16 * TILE_SIZE; // 8192
 const CROP_PADDING_X = 1.2; // 20% wider total around the detected sign
 const CROP_PADDING_Y = 1.5; // Preserve 25% extra sign height above and below the detection
+// Shift crop center down by this fraction of angular height; detection bbox center tends
+// to sit above the sign's visual center (e.g. red band at bottom).
+const CROP_PITCH_BIAS_DOWN = 0.12;
 const DETECTION_CLUSTER_WIDTH_RATIO = 1.25;
 const DETECTION_CLUSTER_HEIGHT_RATIO = 2.4;
 const DETECTION_CLUSTER_WIDTH_FLOOR = 0.35;
@@ -1519,7 +1522,11 @@ async function buildDetectionCropPlan(det, panoId, cropCenterOverride = null) {
   const tilt = metadata.tilt ?? 90;
 
   const cropHeading = cropCenterOverride?.heading ?? det.heading;
-  const cropPitch = cropCenterOverride?.pitch ?? det.pitch;
+  const pitchBias =
+    cropCenterOverride == null && Number.isFinite(det.angularHeight)
+      ? CROP_PITCH_BIAS_DOWN * det.angularHeight
+      : 0;
+  const cropPitch = (cropCenterOverride?.pitch ?? det.pitch) - pitchBias;
   const uncorrected = headingPitchToPixel(
     cropHeading,
     cropPitch,
