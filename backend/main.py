@@ -902,6 +902,213 @@ async def detect_sahi(request: SahiRequest):
     return await detect_panorama_impl(request)
 
 
+# ---------------------------------------------------------------------------
+# Depth map extraction from Google Street View
+# ---------------------------------------------------------------------------
+
+CAMERA_HEIGHT_M = 2.5  # Google SV car camera height above ground
+
+
+class DepthRequest(BaseModel):
+    pano_id: str
+    sign_heading: float
+    road_bearing: float
+
+
+class DepthSample(BaseModel):
+    pitch: float
+    raw_depth: float
+    horiz_dist: float
+    plane_idx: int
+
+
+class DepthResponse(BaseModel):
+    pano_id: str
+    width: int
+    height: int
+    num_planes: int
+    sign_heading: float
+    road_bearing: float
+    alpha_deg: float
+    ground_samples: list[DepthSample]
+    sign_samples: list[DepthSample]
+    curb_distance_m: Optional[float] = None
+    along_road_m: Optional[float] = None
+
+
+def _fetch_depth_data(pano_id: str) -> str | None:
+    """Fetch raw depth map string from Google's photometa endpoint."""
+    import requests as sync_requests
+
+    url = "https://www.google.com/maps/photometa/v1"
+    params = {
+        "authuser": "0",
+        "hl": "en",
+        "gl": "us",
+        "pb": (
+            "!1m4!1smaps_sv.tactile!11m2!2m1!1b1!2m2!1sen!2sus"
+            f"!3m3!1m2!1e2!2s{pano_id}"
+            "!4m57!1e1!1e2!1e3!1e4!1e5!1e6!1e8!1e12"
+            "!2m1!1e1!4m1!1i48!5m1!1e1!5m1!1e2"
+            "!6m1!1e1!6m1!1e2"
+            "!9m36!1m3!1e2!2b1!3e2!1m3!1e2!2b0!3e3"
+            "!1m3!1e3!2b1!3e2!1m3!1e3!2b0!3e3"
+            "!1m3!1e8!2b0!3e3!1m3!1e1!2b0!3e3"
+            "!1m3!1e4!2b0!3e3!1m3!1e10!2b1!3e2"
+            "!1m3!1e10!2b0!3e3"
+        ),
+    }
+    resp = sync_requests.get(url, params=params, timeout=15)
+    if resp.status_code != 200:
+        return None
+
+    import json as json_mod
+
+    text = resp.text
+    if text.startswith(")]}'"):
+        text = text[text.index("\n") + 1:]
+    try:
+        data = json_mod.loads(text)
+    except Exception:
+        return None
+
+    for path in ([1, 0, 5, 0, 5, 1, 2], [1, 0, 5, 0, 5, 2, 2]):
+        try:
+            node = data
+            for idx in path:
+                node = node[idx]
+            if isinstance(node, str) and len(node) > 50:
+                return node
+        except (IndexError, TypeError, KeyError):
+            continue
+    return None
+
+
+def _decode_depth(raw: str) -> bytes:
+    import struct as struct_mod
+    import zlib as zlib_mod
+
+    padded = raw + "=" * ((4 - len(raw) % 4) % 4)
+    padded = padded.replace("-", "+").replace("_", "/")
+    decoded = base64.b64decode(padded)
+    try:
+        return zlib_mod.decompress(decoded)
+    except zlib_mod.error:
+        return decoded
+
+
+def _parse_depth_map(data: bytes):
+    """Parse binary depth map into (width, height, num_planes, planes, indices)."""
+    import struct as struct_mod
+
+    num_planes = struct_mod.unpack_from("<H", data, 1)[0]
+    width = struct_mod.unpack_from("<H", data, 3)[0]
+    height = struct_mod.unpack_from("<H", data, 5)[0]
+    offset = struct_mod.unpack_from("<H", data, 7)[0]
+
+    indices = list(data[offset: offset + width * height])
+
+    planes = []
+    plane_offset = offset + width * height
+    for i in range(num_planes):
+        b = plane_offset + i * 16
+        nx = struct_mod.unpack_from("<f", data, b)[0]
+        ny = struct_mod.unpack_from("<f", data, b + 4)[0]
+        nz = struct_mod.unpack_from("<f", data, b + 8)[0]
+        d = struct_mod.unpack_from("<f", data, b + 12)[0]
+        planes.append((nx, ny, nz, d))
+
+    return width, height, num_planes, planes, indices
+
+
+def _sample_depth(width, height, planes, indices, heading_deg, pitch_deg):
+    """Sample depth at heading/pitch.  Returns (distance, plane_idx) or (None, -1)."""
+    theta = (90 - pitch_deg) * math.pi / 180
+    phi = (180 - heading_deg) * math.pi / 180
+
+    y = int(theta / math.pi * height) % height
+    x = int(phi / (2 * math.pi) * width) % width
+
+    pidx = indices[y * width + x]
+    if pidx == 0:
+        return None, -1
+
+    sin_t = math.sin(theta)
+    cos_t = math.cos(theta)
+    sin_p = math.sin(phi)
+    cos_p = math.cos(phi)
+
+    vx = sin_t * cos_p
+    vy = sin_t * sin_p
+    vz = cos_t
+
+    nx, ny, nz, d = planes[pidx]
+    denom = vx * nx + vy * ny + vz * nz
+    if abs(denom) < 1e-10:
+        return None, -1
+
+    return abs(d / denom), pidx
+
+
+@app.post("/depth", response_model=DepthResponse)
+async def get_depth(req: DepthRequest):
+    """Fetch and sample depth map for a panorama."""
+    raw = _fetch_depth_data(req.pano_id)
+    if not raw:
+        raise HTTPException(status_code=404, detail="Depth data unavailable for this panorama")
+
+    decoded = _decode_depth(raw)
+    w, h, num_planes, planes, indices = _parse_depth_map(decoded)
+
+    sign_h = req.sign_heading % 360
+    alpha = (sign_h - req.road_bearing) % 360
+    if alpha > 180:
+        alpha -= 360
+
+    ground_pitches = [-20, -25, -30, -35, -40, -45, -50, -60]
+    sign_pitches = [5, 0, -5, -10]
+
+    ground_samples = []
+    for p in ground_pitches:
+        d, pidx = _sample_depth(w, h, planes, indices, sign_h, p)
+        if d is not None and d < 1000:
+            ground_samples.append(DepthSample(
+                pitch=p, raw_depth=round(d, 2),
+                horiz_dist=round(d * math.cos(math.radians(p)), 2),
+                plane_idx=pidx,
+            ))
+
+    sign_samples = []
+    for p in sign_pitches:
+        d, pidx = _sample_depth(w, h, planes, indices, sign_h, p)
+        if d is not None and d < 1000:
+            sign_samples.append(DepthSample(
+                pitch=p, raw_depth=round(d, 2),
+                horiz_dist=round(d * math.cos(math.radians(p)), 2),
+                plane_idx=pidx,
+            ))
+
+    curb_dist = None
+    along_road = None
+    best = [s for s in ground_samples if -40 <= s.pitch <= -25]
+    if best:
+        representative = min(best, key=lambda s: abs(s.pitch - (-30)))
+        h_dist = representative.horiz_dist
+        curb_dist = round(abs(h_dist * math.sin(math.radians(alpha))), 2)
+        along_road = round(h_dist * math.cos(math.radians(alpha)), 2)
+
+    return DepthResponse(
+        pano_id=req.pano_id,
+        width=w, height=h, num_planes=num_planes,
+        sign_heading=sign_h, road_bearing=req.road_bearing,
+        alpha_deg=round(alpha, 1),
+        ground_samples=ground_samples,
+        sign_samples=sign_samples,
+        curb_distance_m=curb_dist,
+        along_road_m=along_road,
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
