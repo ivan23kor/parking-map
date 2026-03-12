@@ -13,6 +13,9 @@ let positionChangeListener = null;
 const panoramaLinkSpotPositionCache = new Map();
 const panoramaLinkSpotRequestsInFlight = new Set();
 
+// Depth measurement state
+let currentDepthData = null; // Cached depth response for current panorama + detection
+
 /**
  * Calculate FOV from Street View zoom level.
  * Google's Street View uses: fov = 2 * atan(2^(1-zoom))
@@ -1029,6 +1032,194 @@ function clearMarkedPoints() {
 }
 
 /**
+ * Fetch depth data for a detected sign and cache it.
+ */
+async function fetchDepthForDetection(det, roadBearing) {
+  const panoId = detectionPanorama?.getPano?.();
+  const apiUrl = window.DETECTION_CONFIG?.API_URL;
+  if (!panoId || !apiUrl || !Number.isFinite(det.heading) || !Number.isFinite(roadBearing)) return;
+
+  try {
+    const resp = await fetch(`${apiUrl}/depth`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pano_id: panoId,
+        sign_heading: det.heading,
+        road_bearing: roadBearing,
+      }),
+    });
+    if (!resp.ok) {
+      console.warn("Depth fetch failed:", resp.status);
+      return;
+    }
+    currentDepthData = await resp.json();
+    updateDetectionOverlay();
+  } catch (err) {
+    console.warn("Depth fetch error:", err);
+  }
+}
+
+/**
+ * Render depth measurement overlay lines on the panorama SVG.
+ * Draws:
+ * - A line from the camera (bottom center) down to the ground at sign heading
+ * - The road bearing reference line
+ * - The angle arc between road bearing and sign heading
+ * - Distance and angle labels
+ */
+function renderDepthOverlay(overlay, pov, fov, screenWidth, screenHeight) {
+  if (!currentDepthData) return;
+
+  const { sign_heading, road_bearing, alpha_deg, ground_samples, curb_distance_m, along_road_m } = currentDepthData;
+
+  const SVG_NS = "http://www.w3.org/2000/svg";
+
+  const mkLine = (x1, y1, x2, y2, color, width, dash) => {
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("x1", x1);
+    line.setAttribute("y1", y1);
+    line.setAttribute("x2", x2);
+    line.setAttribute("y2", y2);
+    line.setAttribute("stroke", color);
+    line.setAttribute("stroke-width", width);
+    if (dash) line.setAttribute("stroke-dasharray", dash);
+    line.classList.add("depth-overlay");
+    return line;
+  };
+
+  const mkText = (x, y, text, color, size, anchor) => {
+    const el = document.createElementNS(SVG_NS, "text");
+    el.setAttribute("x", x);
+    el.setAttribute("y", y);
+    el.setAttribute("fill", color);
+    el.setAttribute("font-size", size || "13");
+    el.setAttribute("font-weight", "bold");
+    el.setAttribute("font-family", "monospace");
+    if (anchor) el.setAttribute("text-anchor", anchor);
+    el.textContent = text;
+    el.classList.add("depth-overlay");
+    return el;
+  };
+
+  const mkCircle = (cx, cy, r, color) => {
+    const el = document.createElementNS(SVG_NS, "circle");
+    el.setAttribute("cx", cx);
+    el.setAttribute("cy", cy);
+    el.setAttribute("r", r);
+    el.setAttribute("fill", color);
+    el.classList.add("depth-overlay");
+    return el;
+  };
+
+  // Project heading/pitch to screen coords
+  const toScreen = (heading, pitch) => {
+    const dir = headingPitchToDirection(heading, pitch);
+    return directionToScreen(dir, pov.heading, pov.pitch, fov, screenWidth, screenHeight);
+  };
+
+  // Sign heading line: from horizon (pitch=0) down to ground (pitch=-30)
+  const signHorizonPt = toScreen(sign_heading, 0);
+  const signGroundPt = toScreen(sign_heading, -30);
+
+  // Road bearing line: from horizon down to ground
+  const roadHorizonPt = toScreen(road_bearing, 0);
+  const roadGroundPt = toScreen(road_bearing, -30);
+
+  // Draw road bearing reference line (yellow dashed)
+  if (roadHorizonPt && roadGroundPt) {
+    overlay.appendChild(mkLine(roadHorizonPt.x, roadHorizonPt.y, roadGroundPt.x, roadGroundPt.y, "#facc15", "2", "6,4"));
+    const roadLabelPt = toScreen(road_bearing, -5);
+    if (roadLabelPt) {
+      overlay.appendChild(mkText(roadLabelPt.x + 8, roadLabelPt.y, `Road ${Math.round(road_bearing)}°`, "#facc15", "11", "start"));
+    }
+  }
+
+  // Draw sign heading line (cyan solid)
+  if (signHorizonPt && signGroundPt) {
+    overlay.appendChild(mkLine(signHorizonPt.x, signHorizonPt.y, signGroundPt.x, signGroundPt.y, "#22d3ee", "2.5", null));
+  }
+
+  // Draw ground sample points along the sign heading
+  for (const sample of ground_samples) {
+    const pt = toScreen(sign_heading, sample.pitch);
+    if (!pt) continue;
+    const isRepresentative = Math.abs(sample.pitch - (-30)) < 3;
+    const color = isRepresentative ? "#f472b6" : "#22d3ee";
+    const radius = isRepresentative ? 5 : 3;
+    overlay.appendChild(mkCircle(pt.x, pt.y, radius, color));
+
+    if (isRepresentative) {
+      overlay.appendChild(mkText(pt.x + 10, pt.y - 2, `${sample.horiz_dist}m horiz`, "#f472b6", "12", "start"));
+    }
+  }
+
+  // Draw sign-level sample points
+  for (const sample of (currentDepthData.sign_samples || [])) {
+    const pt = toScreen(sign_heading, sample.pitch);
+    if (!pt) continue;
+    overlay.appendChild(mkCircle(pt.x, pt.y, 3, "#a78bfa"));
+    overlay.appendChild(mkText(pt.x + 10, pt.y + 4, `${sample.raw_depth.toFixed(1)}m`, "#a78bfa", "10", "start"));
+  }
+
+  // Draw angle arc between road and sign heading at the horizon
+  const arcCenter = toScreen((road_bearing + sign_heading) / 2, -2);
+  if (arcCenter && Math.abs(alpha_deg) > 5) {
+    // Draw a small arc indicator using intermediate heading points
+    const steps = 8;
+    const startH = road_bearing;
+    const endH = sign_heading;
+    let deltaH = (endH - startH) % 360;
+    if (deltaH > 180) deltaH -= 360;
+    if (deltaH < -180) deltaH += 360;
+
+    let prevPt = toScreen(startH, -2);
+    for (let i = 1; i <= steps; i++) {
+      const h = startH + (deltaH * i) / steps;
+      const curPt = toScreen(h, -2);
+      if (prevPt && curPt) {
+        overlay.appendChild(mkLine(prevPt.x, prevPt.y, curPt.x, curPt.y, "#fb923c", "1.5", "3,3"));
+      }
+      prevPt = curPt;
+    }
+    // Angle label at midpoint
+    const midH = startH + deltaH / 2;
+    const midPt = toScreen(midH, -5);
+    if (midPt) {
+      overlay.appendChild(mkText(midPt.x, midPt.y, `α=${Math.abs(alpha_deg).toFixed(1)}°`, "#fb923c", "12", "middle"));
+    }
+  }
+
+  // Info box at bottom-right showing computed distances
+  if (curb_distance_m != null || along_road_m != null) {
+    const boxX = screenWidth - 220;
+    const boxY = screenHeight - 90;
+    const bg = document.createElementNS(SVG_NS, "rect");
+    bg.setAttribute("x", boxX);
+    bg.setAttribute("y", boxY);
+    bg.setAttribute("width", 210);
+    bg.setAttribute("height", 80);
+    bg.setAttribute("rx", 6);
+    bg.setAttribute("fill", "rgba(0,0,0,0.75)");
+    bg.setAttribute("stroke", "#22d3ee");
+    bg.setAttribute("stroke-width", "1");
+    bg.classList.add("depth-overlay");
+    overlay.appendChild(bg);
+
+    let lineY = boxY + 18;
+    overlay.appendChild(mkText(boxX + 10, lineY, "DEPTH MEASUREMENT", "#22d3ee", "11", "start"));
+    lineY += 18;
+    if (curb_distance_m != null)
+      overlay.appendChild(mkText(boxX + 10, lineY, `Curb dist: ${curb_distance_m.toFixed(1)}m`, "#f472b6", "13", "start"));
+    lineY += 18;
+    if (along_road_m != null)
+      overlay.appendChild(mkText(boxX + 10, lineY, `Along road: ${along_road_m.toFixed(1)}m`, "#4ade80", "13", "start"));
+    lineY += 18;
+    overlay.appendChild(mkText(boxX + 10, lineY, `vs fixed: 3.1m`, "#94a3b8", "11", "start"));
+  }
+}
+
+/**
  * Update SVG overlay with detection boxes.
  */
 function updateDetectionOverlay() {
@@ -1044,6 +1235,7 @@ function updateDetectionOverlay() {
   // Clear existing boxes (but keep markers)
   overlay.querySelectorAll(":not(.sign-marker)").forEach((el) => el.remove());
 
+  renderDepthOverlay(overlay, pov, fov, width, height);
   renderPanoramaLinkSpotsOverlay(overlay, pov, fov, width, height);
 
   // Draw each detection if visible
@@ -1305,7 +1497,7 @@ function initDetectionPanorama(panoId, heading, container) {
       showRoadLabels: false,
       motionTracking: false,
       motionTrackingControl: false,
-      linksControl: true,
+      linksControl: false,
       panControl: true,
       zoomControl: true,
       fullscreenControl: false,
@@ -1375,6 +1567,7 @@ function handleMarkerKeyboard(event) {
  */
 function clearDetections() {
   currentDetections = [];
+  currentDepthData = null;
   updateDetectionOverlay();
 
   const statusEl = document.getElementById("detectionStatus");
@@ -1562,7 +1755,17 @@ async function runDetectionOnPanorama(
         : result.detections;
 
     detectionPov = { heading: detectHeading, pitch, fov };
+    currentDepthData = null;
     updateDetectionOverlay();
+
+    // Fetch depth measurement for the highest-confidence detection
+    if (currentDetections.length > 0 && typeof currentDetectionContext !== "undefined" && currentDetectionContext) {
+      const bestDet = currentDetections.reduce((a, b) => a.confidence > b.confidence ? a : b);
+      const roadBearing = currentDetectionContext.streetBearing;
+      if (Number.isFinite(bestDet.heading) && Number.isFinite(roadBearing)) {
+        fetchDepthForDetection(bestDet, roadBearing);
+      }
+    }
 
     const count = currentDetections.length;
     const timeMs = result.total_inference_time_ms;
