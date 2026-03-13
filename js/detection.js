@@ -10,6 +10,8 @@ let detectionPov = { heading: 0, pitch: 0, zoom: 1 }; // POV when detection was 
 let povChangeListener = null;
 let panoChangeListener = null;
 let positionChangeListener = null;
+// Track document-level event listeners for proper cleanup
+const documentEventListeners = [];
 const panoramaLinkSpotPositionCache = new Map();
 const panoramaLinkSpotRequestsInFlight = new Set();
 
@@ -1674,10 +1676,19 @@ function initDetectionPanorama(panoId, heading, container) {
       },
     );
 
+    // Remove old document-level listeners before adding new ones
+    for (const { event, handler } of documentEventListeners) {
+      document.removeEventListener(event, handler);
+    }
+    documentEventListeners.length = 0;
+
     // Track mouse position at document level (works over bounding boxes too)
     document.addEventListener("mousemove", trackMousePosition);
+    documentEventListeners.push({ event: "mousemove", handler: trackMousePosition });
     document.addEventListener("keydown", handleSignMarking);
+    documentEventListeners.push({ event: "keydown", handler: handleSignMarking });
     document.addEventListener("keydown", handleMarkerKeyboard);
+    documentEventListeners.push({ event: "keydown", handler: handleMarkerKeyboard });
   }
 
   currentDetections = [];

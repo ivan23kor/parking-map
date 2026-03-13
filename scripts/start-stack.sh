@@ -82,6 +82,13 @@ trap cleanup EXIT INT TERM
 
 ensure_backend_env
 
+# Kill any existing processes on our ports
+for pid in $(ss -tlnp 2>/dev/null | grep -E ":${BACKEND_PORT}|:${WEB_PORT}" | grep -oP 'pid=\K[0-9]+'); do
+  echo "Killing existing process $pid"
+  kill "$pid" 2>/dev/null || true
+done
+sleep 1
+
 echo "Starting backend on http://127.0.0.1:${BACKEND_PORT}"
 "$ROOT_DIR/.venv/bin/python" -m uvicorn backend.main:app \
   --host 127.0.0.1 \

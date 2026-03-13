@@ -94,3 +94,14 @@ server.listen(PORT, () => {
     console.log(`Server running at http://localhost:${PORT}`);
     if (!API_KEY) console.warn('⚠️  GOOGLE_MAPS_API_KEY not set in environment');
 });
+
+server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+        console.error(`❌ Port ${PORT} is already in use. Another instance may be running.`);
+        console.error('   Kill existing process or use a different port.');
+        process.exit(1);
+    } else {
+        console.error('Server error:', err);
+        process.exit(1);
+    }
+});
