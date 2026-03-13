@@ -1201,15 +1201,11 @@ function renderDepthOverlay(overlay, pov, fov, screenWidth, screenHeight) {
     // Draw previously collected calibration reference points
     for (const ref of calibrationData) {
       const basePt = toScreen(ref.base_heading, ref.base_pitch);
-      const signPt = toScreen(ref.sign_heading, ref.sign_pitch);
       if (basePt) {
         overlay.appendChild(mkCircle(basePt.x, basePt.y, 5, "#4ade80"));
         // Cross
         overlay.appendChild(mkLine(basePt.x - 6, basePt.y, basePt.x + 6, basePt.y, "#4ade80", "2", null));
         overlay.appendChild(mkLine(basePt.x, basePt.y - 6, basePt.x, basePt.y + 6, "#4ade80", "2", null));
-      }
-      if (basePt && signPt) {
-        overlay.appendChild(mkLine(signPt.x, signPt.y, basePt.x, basePt.y, "#4ade80", "1", "3,3"));
       }
     }
   }
