@@ -79,10 +79,15 @@
         z-index: 2001;
         padding: 16px;
         display: none;
+        gap: 8px;
+      }
+
+      #detectionControls.visible {
+        display: flex;
       }
 
       #detectionControls button {
-        width: 100%;
+        flex: 1;
         background: rgba(255, 255, 255, 0.92);
         color: #333;
         border: none;
@@ -94,6 +99,77 @@
 
       #detectionControls button:hover {
         background: white;
+      }
+
+      #calibrateBtn.active {
+        background: rgba(34, 211, 238, 0.85);
+        color: #000;
+      }
+
+      #calibrateBtn.active:hover {
+        background: rgba(34, 211, 238, 1);
+      }
+
+      #calibrationPanel {
+        position: absolute;
+        bottom: 100px;
+        right: 10px;
+        z-index: 2001;
+        background: rgba(0, 0, 0, 0.82);
+        color: #e5e7eb;
+        border: 1px solid rgba(34, 211, 238, 0.3);
+        border-radius: 8px;
+        padding: 10px 14px;
+        font-size: 12px;
+        font-family: monospace;
+        max-width: 280px;
+        max-height: 300px;
+        overflow-y: auto;
+        display: none;
+      }
+
+      #calibrationPanel.visible {
+        display: block;
+      }
+
+      #calibrationPanel h4 {
+        margin: 0 0 6px 0;
+        color: #22d3ee;
+        font-size: 12px;
+      }
+
+      #calibrationPanel .cal-row {
+        display: flex;
+        justify-content: space-between;
+        padding: 2px 0;
+        border-bottom: 1px solid rgba(255,255,255,0.06);
+      }
+
+      #calibrationPanel .cal-row .cal-remove {
+        cursor: pointer;
+        color: #f87171;
+        margin-left: 8px;
+      }
+
+      #calibrationPanel .cal-actions {
+        margin-top: 8px;
+        display: flex;
+        gap: 6px;
+      }
+
+      #calibrationPanel .cal-actions button {
+        flex: 1;
+        padding: 4px 8px;
+        font-size: 11px;
+        border-radius: 4px;
+        border: 1px solid rgba(255,255,255,0.15);
+        background: rgba(255,255,255,0.08);
+        color: #e5e7eb;
+        cursor: pointer;
+      }
+
+      #calibrationPanel .cal-actions button:hover {
+        background: rgba(255,255,255,0.15);
       }
 
       #detectionPanorama {
@@ -352,11 +428,14 @@
         </button>
         <div id="detectionControls">
           <button id="redetectBtn">Detect</button>
+          <button id="calibrateBtn">Calibrate</button>
+          <button id="debugBtn" type="button">Debug Info</button>
         </div>
         <div id="detectionPanorama"></div>
         <svg id="detectionOverlay"></svg>
         <div id="detectionStatus">Tap to detect...</div>
         <div id="detectionInfo"></div>
+        <div id="calibrationPanel"></div>
       </section>
 
       <section id="mapPane" aria-label="Map view">
@@ -366,6 +445,8 @@
         </button>
       </section>
     </div>
+
+    <pre id="parksight-dump" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;margin:0;padding:20px;background:rgba(0,0,0,0.95);color:#4ade80;font-size:12px;overflow:auto;white-space:pre-wrap;word-break:break-all;cursor:pointer" onclick="this.style.display='none'"></pre>
 
     <div id="cropAbModal" aria-label="Crop A/B comparison">
       <div class="crop-ab-content">
@@ -1529,6 +1610,22 @@
         document
           .getElementById("clearProjectedSignsBtn")
           .addEventListener("click", clearProjectedSigns);
+        document
+          .getElementById("calibrateBtn")
+          .addEventListener("click", toggleCalibrationMode);
+        document
+          .getElementById("redetectBtn")
+          .addEventListener("click", rerunDetection);
+        document
+          .getElementById("debugBtn")
+          .addEventListener("click", function () {
+            const dumpEl = document.getElementById("parksight-dump");
+            if (dumpEl.style.display !== "none") {
+              dumpEl.style.display = "none";
+              return;
+            }
+            window._dump();
+          });
 
         // Click map to open closest panorama
         map.on("click", async (e) => {
@@ -1878,11 +1975,114 @@
           syncPanoramaCaptureSpotsOnMap();
         }
         statusEl.textContent = `Tap to detect (heading: ${Math.round(currentDetectionContext.heading)}°)`;
+        const controls = document.getElementById("detectionControls");
+        if (controls) controls.classList.add("visible");
       }
 
       function getProjectionSide(viewSide) {
         return viewSide === "left" ? "right" : "left";
       }
+
+      // ── Consolidated state dump ──
+
+      window._dump = function () {
+        const state = {};
+
+        try {
+          const pov = detectionPanorama?.getPov?.() || {};
+          const fov = Number.isFinite(pov.zoom) ? zoomToFov(pov.zoom) : null;
+          const pos = detectionPanorama?.getPosition?.();
+          const panoLat = pos?.lat?.();
+          const panoLng = pos?.lng?.();
+
+          state.timestamp = new Date().toISOString();
+          state.panoId = detectionPanorama?.getPano?.() || null;
+          state.pov = { heading: pov.heading, pitch: pov.pitch, zoom: pov.zoom };
+          state.fov = fov;
+          state.panoPosition = Number.isFinite(panoLat) ? { lat: panoLat, lng: panoLng } : null;
+
+          state.context = currentDetectionContext
+            ? {
+                streetName: currentDetectionContext.streetName,
+                streetBearing: currentDetectionContext.streetBearing,
+                side: currentDetectionContext.side,
+                oneway: currentDetectionContext.oneway,
+                highway: currentDetectionContext.highway,
+                lanes: currentDetectionContext.lanes,
+                panoId: currentDetectionContext.panoId,
+                heading: currentDetectionContext.heading,
+              }
+            : null;
+
+          state.detections = currentDetections.map((d, i) => ({
+            index: i,
+            heading: d.heading,
+            pitch: d.pitch,
+            angularWidth: d.angularWidth,
+            angularHeight: d.angularHeight,
+            distanceAngularHeight: d.distanceAngularHeight,
+            confidence: d.confidence,
+            class_name: d.class_name,
+          }));
+
+          state.calibration = {
+            mode: calibrationMode,
+            cameraHeight: CAMERA_HEIGHT_M,
+            deltaH: fitDeltaH(),
+            pointCount: calibrationData.length,
+            points: calibrationData.map((d) => ({
+              pano_id: d.pano_id,
+              sign_heading: d.sign_heading,
+              sign_pitch: d.sign_pitch,
+              base_heading: d.base_heading,
+              base_pitch: d.base_pitch,
+              depth_at_base: d.depth_at_base,
+              horiz_dist: d.horiz_dist,
+            })),
+          };
+
+          state.depth = currentDepthData;
+
+          state.calibrationLog = (window._calibrationLog || []).map((e) => ({
+            signIdx: e.signIdx,
+            heading: e.heading,
+            pitch: e.pitch,
+            angularHeight: e.angularHeight,
+            distanceAngularHeight: e.distanceAngularHeight,
+            estimatedDistance: e.estimatedDistance,
+            method: e.method,
+            panoId: e.panoId,
+            cameraLat: e.cameraLat,
+            cameraLng: e.cameraLng,
+            signLat: e.signLat,
+            signLng: e.signLng,
+            groundTruthDistance: e.groundTruthDistance,
+            groundTruthMethod: e.groundTruthMethod,
+          }));
+
+          const dumpEl = document.getElementById("parksight-dump");
+          const json = JSON.stringify(state, null, 2);
+          if (dumpEl) {
+            dumpEl.textContent = json;
+            dumpEl.style.display = "block";
+          }
+          console.log("%c[parksight-dump]", "color:#4ade80;font-weight:bold", state);
+
+          const apiUrl = window.DETECTION_CONFIG?.API_URL;
+          if (apiUrl) {
+            fetch(`${apiUrl}/dump`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: json,
+            }).catch(() => {});
+          }
+
+          return state;
+        } catch (err) {
+          console.error("_dump() error:", err);
+          return state;
+        }
+      };
 
       // ── Calibration helpers (call from DevTools console) ──
 
@@ -1928,62 +2128,12 @@
           return;
         }
 
-        // Check if there is a pending sign mark from Ctrl-click
-        const mark = pendingSignMark;
         let gtLat, gtLng, gtDist, gtMethod;
 
-        // Ground-truth camera/sign heights for pitch-based projection
-        const GT_CAMERA_HEIGHT = 1.7;   // Street View camera effective height (m)
-        const GT_SIGN_FACE_HEIGHT = 2.2; // Typical parking sign face center (m)
-
-        if (mark && Number.isFinite(mark.heading) && Number.isFinite(mark.pitch) && Math.abs(mark.pitch) > 0.5) {
-          // Compute horizontal distance from pitch angle + known height difference
-          let verticalDelta;
-          if (mark.pitch > 0) {
-            // Looking up at sign face: sign is above camera
-            verticalDelta = GT_SIGN_FACE_HEIGHT - GT_CAMERA_HEIGHT; // 0.5m
-          } else {
-            // Looking down at sign base: sign base is below camera
-            verticalDelta = GT_CAMERA_HEIGHT;
-          }
-          const absPitchRad = Math.abs(mark.pitch) * Math.PI / 180;
-          const pitchDist = verticalDelta / Math.tan(absPitchRad);
-          const projected = projectLatLng(gtPanoLat, gtPanoLng, pitchDist, mark.heading);
-          gtLat = projected.lat;
-          gtLng = projected.lng;
-          gtDist = haversineDistanceMeters(entry.cameraLat, entry.cameraLng, gtLat, gtLng);
-          gtMethod = mark.pitch > 0 ? "mark+pitch-up" : "mark+pitch-down";
-
-          // Also record the close-pano distance for comparison
-          const panoDist = haversineDistanceMeters(entry.cameraLat, entry.cameraLng, gtPanoLat, gtPanoLng);
-
-          entry.gtMarkHeading = mark.heading;
-          entry.gtMarkPitch = mark.pitch;
-          entry.gtPitchDistance = pitchDist;
-          entry.gtPanoLat = gtPanoLat;
-          entry.gtPanoLng = gtPanoLng;
-          entry.gtPanoDistance = panoDist;
-
-          console.log(
-            `%c[Calibration] Using marked sign: heading=${mark.heading.toFixed(1)}° pitch=${mark.pitch.toFixed(2)}° (${mark.pitch > 0 ? "up, Δh=" + verticalDelta.toFixed(1) + "m" : "down, Δh=" + verticalDelta.toFixed(1) + "m"}) → pitch-dist=${pitchDist.toFixed(2)}m from close pano`,
-            "color: #a78bfa",
-          );
-
-          // Clear the pending mark so it doesn't interfere with the next pair
-          pendingSignMark = null;
-        } else {
-          // Fallback: use pano position directly (less accurate)
-          gtLat = gtPanoLat;
-          gtLng = gtPanoLng;
-          gtDist = haversineDistanceMeters(entry.cameraLat, entry.cameraLng, gtLat, gtLng);
-          gtMethod = "pano-only";
-
-          if (mark) {
-            console.warn("[Calibration] Mark exists but |pitch| too shallow (<= 0.5°) for distance. Using pano position.");
-          } else {
-            console.warn("[Calibration] No Ctrl-mark found. Using raw pano position. For better accuracy, Ctrl-hover the sign first.");
-          }
-        }
+        gtLat = gtPanoLat;
+        gtLng = gtPanoLng;
+        gtDist = haversineDistanceMeters(entry.cameraLat, entry.cameraLng, gtLat, gtLng);
+        gtMethod = "pano-only";
 
         entry.groundTruthLat = gtLat;
         entry.groundTruthLng = gtLng;

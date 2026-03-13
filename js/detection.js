@@ -16,6 +16,124 @@ const panoramaLinkSpotRequestsInFlight = new Set();
 // Depth measurement state
 let currentDepthData = null; // Cached depth response for current panorama + detection
 
+// Calibration state
+let calibrationMode = false;
+let calibrationData = []; // Reference points: {pano_id, sign_heading, sign_pitch, base_heading, base_pitch, depth_at_base, horiz_dist, timestamp}
+const CALIBRATION_STORAGE_KEY = "parksight_calibration_data";
+const CAMERA_HEIGHT_M = 2.5;
+
+function loadCalibrationData() {
+  try {
+    const stored = localStorage.getItem(CALIBRATION_STORAGE_KEY);
+    if (stored) calibrationData = JSON.parse(stored);
+  } catch (e) {
+    console.warn("Failed to load calibration data:", e);
+  }
+}
+
+function saveCalibrationData() {
+  try {
+    localStorage.setItem(CALIBRATION_STORAGE_KEY, JSON.stringify(calibrationData));
+  } catch (e) {
+    console.warn("Failed to save calibration data:", e);
+  }
+}
+
+function fitDeltaH() {
+  if (calibrationData.length === 0) return null;
+  const values = calibrationData
+    .filter((d) => d.horiz_dist > 0 && Math.abs(d.sign_pitch) > 0.1)
+    .map((d) => d.horiz_dist * Math.tan((-d.sign_pitch * Math.PI) / 180));
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+function estimateSignDistance(signPitch) {
+  const deltaH = fitDeltaH();
+  if (deltaH == null || Math.abs(signPitch) < 0.1) return null;
+  return deltaH / Math.tan((-signPitch * Math.PI) / 180);
+}
+
+function toggleCalibrationMode() {
+  calibrationMode = !calibrationMode;
+  const btn = document.getElementById("calibrateBtn");
+  if (btn) {
+    btn.classList.toggle("active", calibrationMode);
+    btn.textContent = calibrationMode
+      ? `Calibrating (${calibrationData.length})`
+      : "Calibrate";
+  }
+  const panel = document.getElementById("calibrationPanel");
+  if (panel) panel.classList.toggle("visible", calibrationMode);
+
+  if (calibrationMode) {
+    loadCalibrationData();
+    renderCalibrationPanel();
+  }
+  pendingBaseMark = null;
+  updateDetectionOverlay();
+}
+
+
+function removeCalibrationPoint(index) {
+  calibrationData.splice(index, 1);
+  saveCalibrationData();
+  renderCalibrationPanel();
+  updateDetectionOverlay();
+  const btn = document.getElementById("calibrateBtn");
+  if (btn && calibrationMode) btn.textContent = `Calibrating (${calibrationData.length})`;
+}
+
+function resetCalibration() {
+  calibrationData = [];
+  saveCalibrationData();
+  renderCalibrationPanel();
+  updateDetectionOverlay();
+  const btn = document.getElementById("calibrateBtn");
+  if (btn && calibrationMode) btn.textContent = "Calibrating (0)";
+}
+
+function renderCalibrationPanel() {
+  const panel = document.getElementById("calibrationPanel");
+  if (!panel) return;
+
+  const deltaH = fitDeltaH();
+  const residuals = calibrationData
+    .filter((d) => d.horiz_dist > 0 && Math.abs(d.sign_pitch) > 0.1)
+    .map((d) => {
+      const dh_i = d.horiz_dist * Math.tan((-d.sign_pitch * Math.PI) / 180);
+      return { dh_i, error: deltaH != null ? Math.abs(dh_i - deltaH) : 0 };
+    });
+  const meanError = residuals.length > 0
+    ? residuals.reduce((s, r) => s + r.error, 0) / residuals.length
+    : 0;
+
+  let html = `<h4>CALIBRATION (${calibrationData.length} pts)</h4>`;
+  if (deltaH != null) {
+    html += `<div style="color:#f472b6">Δh = ${deltaH.toFixed(3)}m</div>`;
+    html += `<div style="color:#94a3b8">Mean error: ${meanError.toFixed(3)}m</div>`;
+    html += `<div style="color:#94a3b8;margin-bottom:6px">Camera: ${CAMERA_HEIGHT_M}m → sign center: ${(CAMERA_HEIGHT_M - deltaH).toFixed(2)}m</div>`;
+  } else {
+    html += `<div style="color:#94a3b8;margin-bottom:6px">Ctrl on post base, then Ctrl on lowest sign bottom</div>`;
+  }
+
+  for (let i = 0; i < calibrationData.length; i++) {
+    const d = calibrationData[i];
+    const dh_i = d.horiz_dist * Math.tan((-d.sign_pitch * Math.PI) / 180);
+    html += `<div class="cal-row">`;
+    html += `<span>#${i + 1} dist=${d.horiz_dist.toFixed(1)}m Δh=${dh_i.toFixed(2)}m</span>`;
+    html += `<span class="cal-remove" onclick="removeCalibrationPoint(${i})">✕</span>`;
+    html += `</div>`;
+  }
+
+  html += `<div class="cal-actions">`;
+  html += `<button onclick="resetCalibration()">Reset all</button>`;
+  html += `</div>`;
+
+  panel.innerHTML = html;
+}
+
 /**
  * Calculate FOV from Street View zoom level.
  * Google's Street View uses: fov = 2 * atan(2^(1-zoom))
@@ -755,12 +873,8 @@ function screenToAngular(
   };
 }
 
-// Paired marking state: alternates between marking sign (ground truth) and detection box
-let markedPairs = []; // Completed pairs: [{sign: {...}, box: {...}, errors: {...}}]
-let pendingSignMark = null; // Waiting for box mark to complete the pair
-let cachedPanoMetadata = null;
-// Legacy alias for cleanup code
-let markedPoints = [];
+// Calibration marking state: alternates between marking post base and bbox bottom
+let pendingBaseMark = null; // 1st Ctrl: {heading, pitch, screenX, screenY}
 
 /**
  * Convert heading/pitch to tile pixel coordinates with tilt correction.
@@ -801,90 +915,16 @@ function headingPitchToPixelCorrected(
 }
 
 /**
- * Collect angular + tile data for a screen position.
- * Shared helper for both sign and box marking.
- */
-async function collectMarkData(screenX, screenY) {
-  const container = document.getElementById("detectionPanorama");
-  const screenWidth = container.clientWidth;
-  const screenHeight = container.clientHeight;
-
-  const pov = detectionPanorama.getPov();
-  const currentFov = zoomToFov(pov.zoom || 1);
-  const panoId = detectionPanorama.getPano();
-
-  const angular = screenToAngular(
-    screenX,
-    screenY,
-    pov.heading,
-    pov.pitch,
-    currentFov,
-    screenWidth,
-    screenHeight,
-  );
-
-  // Get panorama metadata (cache it)
-  if (!cachedPanoMetadata || cachedPanoMetadata.panoId !== panoId) {
-    try {
-      const session = await getSessionToken();
-      const metadata = await fetchStreetViewMetadata(panoId, session);
-      cachedPanoMetadata = { ...metadata, panoId };
-    } catch (err) {
-      console.warn("Could not fetch metadata:", err);
-      cachedPanoMetadata = { heading: 0, tilt: 90, roll: 0, panoId };
-    }
-  }
-
-  const panoHeading = cachedPanoMetadata.heading || 0;
-  const tilt = cachedPanoMetadata.tilt ?? 90;
-
-  const uncorrected = headingPitchToPixel(
-    angular.heading,
-    angular.pitch,
-    TILE_GRID_WIDTH,
-    TILE_GRID_HEIGHT,
-    panoHeading,
-  );
-  const corrected = headingPitchToPixelCorrected(
-    angular.heading,
-    angular.pitch,
-    TILE_GRID_WIDTH,
-    TILE_GRID_HEIGHT,
-    panoHeading,
-    tilt,
-  );
-
-  let relH = angular.heading - panoHeading;
-  if (relH < -180) relH += 360;
-  if (relH > 180) relH -= 360;
-
-  return {
-    panoId,
-    panoHeading,
-    tilt,
-    heading: angular.heading,
-    pitch: angular.pitch,
-    relH,
-    screenX,
-    screenY,
-    tileUncorrected: { x: uncorrected.x, y: uncorrected.y },
-    tileCorrected: { x: corrected.x, y: corrected.y },
-    yCorrection: corrected.yCorrection,
-  };
-}
-
-/**
- * Handle Ctrl key press for paired marking.
+ * Handle Ctrl key press for calibration marking.
  *
- * Workflow:
- *   1st Ctrl — mark the ACTUAL sign center (green crosshair)
- *   2nd Ctrl — mark the BOUNDING BOX center (red crosshair)
- *   → logs the pair with errors, then resets for next pair
- *
- * Escape clears everything.
+ * Workflow (requires calibration mode + detections):
+ *   1st Ctrl — mark the sign POST BASE on the ground (green crosshair)
+ *   2nd Ctrl — mark the bottom of the sign's BOUNDING BOX (pink crosshair)
+ *   → fetches depth at the base, pairs with nearest detection, stores calibration ref
  */
 async function handleSignMarking(event) {
   if (event.key !== "Control" || event.repeat || !detectionPanorama) return;
+  if (!calibrationMode || currentDetections.length === 0) return;
 
   const container = document.getElementById("detectionPanorama");
   const screenX = lastMouseX;
@@ -896,82 +936,118 @@ async function handleSignMarking(event) {
     screenY < 0 ||
     screenY > container.clientHeight
   ) {
-    console.log("Mouse is outside panorama area");
     return;
   }
 
-  const data = await collectMarkData(screenX, screenY);
-  const statusEl =
-    document.getElementById("status") ||
-    document.getElementById("detectionStatus");
-  const pairNum = markedPairs.length + 1;
+  const pov = detectionPanorama.getPov();
+  const fov = zoomToFov(pov.zoom || 1);
+  const w = container.clientWidth;
+  const h = container.clientHeight;
+  const angular = screenToAngular(screenX, screenY, pov.heading, pov.pitch, fov, w, h);
 
-  if (!pendingSignMark) {
-    // --- First Ctrl: mark the actual sign location (ground truth) ---
-    pendingSignMark = data;
-    addMarkerToOverlay(screenX, screenY, `${pairNum}S`, "#00ff00");
+  const statusEl = document.getElementById("detectionStatus");
+  const refNum = calibrationData.length + 1;
+
+  if (!pendingBaseMark) {
+    pendingBaseMark = {
+      heading: angular.heading,
+      pitch: angular.pitch,
+      screenX,
+      screenY,
+    };
+    addMarkerToOverlay(screenX, screenY, `${refNum}B`, "#4ade80");
 
     console.log(
-      `SIGN #${pairNum}: h=${data.heading.toFixed(2)}° p=${data.pitch.toFixed(2)}° relH=${data.relH.toFixed(2)}°\n` +
-        `  tile uncorr=(${data.tileUncorrected.x.toFixed(0)}, ${data.tileUncorrected.y.toFixed(0)}) ` +
-        `corr=(${data.tileCorrected.x.toFixed(0)}, ${data.tileCorrected.y.toFixed(0)}) yCorr=${data.yCorrection.toFixed(1)}px`,
+      `[Calibration] Base #${refNum} marked: h=${angular.heading.toFixed(1)}° p=${angular.pitch.toFixed(1)}°`,
     );
-
     if (statusEl) {
-      statusEl.textContent = `Pair #${pairNum}: sign marked at h=${data.heading.toFixed(1)}° p=${data.pitch.toFixed(1)}° — now Ctrl+hover on the bounding box`;
+      statusEl.textContent =
+        `Ref #${refNum}: base marked — now Ctrl on the bottom of the lowest sign on this post`;
     }
   } else {
-    // --- Second Ctrl: mark the bounding box location ---
-    addMarkerToOverlay(screenX, screenY, `${pairNum}B`, "#ff4444");
+    addMarkerToOverlay(screenX, screenY, `${refNum}S`, "#f472b6");
 
-    const sign = pendingSignMark;
-    const box = data;
-
-    // Compute errors
-    let hErr = box.heading - sign.heading;
-    if (hErr > 180) hErr -= 360;
-    if (hErr < -180) hErr += 360;
-    const pErr = box.pitch - sign.pitch;
-
-    const pair = {
-      num: pairNum,
-      sign,
-      box,
-      errors: {
-        heading: hErr,
-        pitch: pErr,
-        tileX: box.tileCorrected.x - sign.tileCorrected.x,
-        tileY: box.tileCorrected.y - sign.tileCorrected.y,
-      },
-    };
-    markedPairs.push(pair);
-
-    console.log(
-      `BOX  #${pairNum}: h=${box.heading.toFixed(2)}° p=${box.pitch.toFixed(2)}°\n` +
-        `  tile uncorr=(${box.tileUncorrected.x.toFixed(0)}, ${box.tileUncorrected.y.toFixed(0)}) ` +
-        `corr=(${box.tileCorrected.x.toFixed(0)}, ${box.tileCorrected.y.toFixed(0)}) yCorr=${box.yCorrection.toFixed(1)}px\n` +
-        `PAIR #${pairNum} ERROR: Δheading=${hErr.toFixed(2)}° Δpitch=${pErr.toFixed(2)}° Δtile=(${pair.errors.tileX.toFixed(0)}, ${pair.errors.tileY.toFixed(0)})px`,
-    );
-
-    // Summary table if we have multiple pairs
-    if (markedPairs.length > 1) {
-      const avgH =
-        markedPairs.reduce((s, p) => s + p.errors.heading, 0) /
-        markedPairs.length;
-      const avgP =
-        markedPairs.reduce((s, p) => s + p.errors.pitch, 0) /
-        markedPairs.length;
-      console.log(
-        `SUMMARY (${markedPairs.length} pairs): avg Δheading=${avgH.toFixed(2)}° avg Δpitch=${avgP.toFixed(2)}°`,
-      );
+    let nearest = null;
+    let minDist = Infinity;
+    for (const det of currentDetections) {
+      let dh = Math.abs(det.heading - angular.heading);
+      if (dh > 180) dh = 360 - dh;
+      if (dh < minDist) {
+        minDist = dh;
+        nearest = det;
+      }
+    }
+    if (!nearest || minDist > 30) {
+      console.warn("[Calibration] Click too far from any detection, pair discarded");
+      pendingBaseMark = null;
+      if (statusEl) statusEl.textContent = "No nearby detection — pair discarded. Try again.";
+      return;
     }
 
-    if (statusEl) {
-      statusEl.textContent = `Pair #${pairNum}: Δh=${hErr.toFixed(2)}° Δp=${pErr.toFixed(2)}° — Ctrl to start next pair, Esc to clear`;
+    const apiUrl = window.DETECTION_CONFIG?.API_URL;
+    const panoId = detectionPanorama.getPano();
+    if (!apiUrl || !panoId) {
+      pendingBaseMark = null;
+      return;
     }
 
-    // Reset for next pair
-    pendingSignMark = null;
+    if (statusEl) statusEl.textContent = "Sampling depth at sign base...";
+
+    try {
+      const resp = await fetch(`${apiUrl}/depth-sample`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pano_id: panoId,
+          heading: pendingBaseMark.heading,
+          pitch: pendingBaseMark.pitch,
+          api_key: window.GOOGLE_CONFIG?.API_KEY || null,
+        }),
+      });
+      if (!resp.ok) {
+        if (statusEl) statusEl.textContent = "Depth sample failed";
+        pendingBaseMark = null;
+        return;
+      }
+      const depthResult = await resp.json();
+
+      if (depthResult.horiz_dist == null) {
+        if (statusEl) statusEl.textContent = "No depth data at base — try a different panorama";
+        console.warn("[Calibration] No depth data returned for pano", panoId);
+        pendingBaseMark = null;
+        return;
+      }
+
+      const refPoint = {
+        pano_id: panoId,
+        sign_heading: nearest.heading,
+        sign_pitch: nearest.pitch,
+        base_heading: pendingBaseMark.heading,
+        base_pitch: pendingBaseMark.pitch,
+        depth_at_base: depthResult.raw_depth,
+        horiz_dist: depthResult.horiz_dist,
+        timestamp: Date.now(),
+      };
+
+      calibrationData.push(refPoint);
+      saveCalibrationData();
+      renderCalibrationPanel();
+      updateDetectionOverlay();
+
+      const dh = refPoint.horiz_dist * Math.tan((-refPoint.sign_pitch * Math.PI) / 180);
+      const btn = document.getElementById("calibrateBtn");
+      if (btn) btn.textContent = `Calibrating (${calibrationData.length})`;
+      if (statusEl) {
+        statusEl.textContent =
+          `Ref #${calibrationData.length}: dist=${refPoint.horiz_dist.toFixed(1)}m, ` +
+          `Δh=${dh.toFixed(2)}m, sign_pitch=${refPoint.sign_pitch.toFixed(1)}°`;
+      }
+    } catch (err) {
+      console.warn("Calibration depth sample error:", err);
+      if (statusEl) statusEl.textContent = "Calibration depth sample error";
+    }
+
+    pendingBaseMark = null;
   }
 }
 
@@ -1020,15 +1096,12 @@ function addMarkerToOverlay(screenX, screenY, label, color = "#00ff00") {
  * Clear all marked points and visual markers.
  */
 function clearMarkedPoints() {
-  markedPairs = [];
-  pendingSignMark = null;
-  markedPoints = [];
-  cachedPanoMetadata = null;
+  pendingBaseMark = null;
   const overlay = document.getElementById("detectionOverlay");
   if (overlay) {
     overlay.querySelectorAll(".sign-marker").forEach((el) => el.remove());
   }
-  console.log("Cleared all marked pairs");
+  console.log("Cleared calibration markers");
 }
 
 /**
@@ -1046,7 +1119,10 @@ async function fetchDepthForDetection(det, roadBearing) {
       body: JSON.stringify({
         pano_id: panoId,
         sign_heading: det.heading,
+        sign_pitch: det.pitch,
+        sign_angular_height: det.angularHeight ?? null,
         road_bearing: roadBearing,
+        api_key: window.GOOGLE_CONFIG?.API_KEY || null,
       }),
     });
     if (!resp.ok) {
@@ -1069,10 +1145,6 @@ async function fetchDepthForDetection(det, roadBearing) {
  * - Distance and angle labels
  */
 function renderDepthOverlay(overlay, pov, fov, screenWidth, screenHeight) {
-  if (!currentDepthData) return;
-
-  const { sign_heading, road_bearing, alpha_deg, ground_samples, curb_distance_m, along_road_m } = currentDepthData;
-
   const SVG_NS = "http://www.w3.org/2000/svg";
 
   const mkLine = (x1, y1, x2, y2, color, width, dash) => {
@@ -1112,21 +1184,82 @@ function renderDepthOverlay(overlay, pov, fov, screenWidth, screenHeight) {
     return el;
   };
 
-  // Project heading/pitch to screen coords
   const toScreen = (heading, pitch) => {
     const dir = headingPitchToDirection(heading, pitch);
     return directionToScreen(dir, pov.heading, pov.pitch, fov, screenWidth, screenHeight);
   };
 
-  // Sign heading line: from horizon (pitch=0) down to ground (pitch=-30)
-  const signHorizonPt = toScreen(sign_heading, 0);
-  const signGroundPt = toScreen(sign_heading, -30);
+  // In calibration mode: draw vertical guide lines from each detection down
+  if (calibrationMode) {
+    for (const det of currentDetections) {
+      const topPt = toScreen(det.heading, det.pitch);
+      const bottomPt = toScreen(det.heading, det.pitch - 25);
+      if (topPt && bottomPt) {
+        overlay.appendChild(mkLine(topPt.x, topPt.y, bottomPt.x, bottomPt.y, "rgba(74, 222, 128, 0.4)", "1.5", "4,4"));
+      }
+    }
+    // Draw previously collected calibration reference points
+    for (const ref of calibrationData) {
+      const basePt = toScreen(ref.base_heading, ref.base_pitch);
+      const signPt = toScreen(ref.sign_heading, ref.sign_pitch);
+      if (basePt) {
+        overlay.appendChild(mkCircle(basePt.x, basePt.y, 5, "#4ade80"));
+        // Cross
+        overlay.appendChild(mkLine(basePt.x - 6, basePt.y, basePt.x + 6, basePt.y, "#4ade80", "2", null));
+        overlay.appendChild(mkLine(basePt.x, basePt.y - 6, basePt.x, basePt.y + 6, "#4ade80", "2", null));
+      }
+      if (basePt && signPt) {
+        overlay.appendChild(mkLine(signPt.x, signPt.y, basePt.x, basePt.y, "#4ade80", "1", "3,3"));
+      }
+    }
+  }
 
-  // Road bearing line: from horizon down to ground
-  const roadHorizonPt = toScreen(road_bearing, 0);
-  const roadGroundPt = toScreen(road_bearing, -30);
+  if (!currentDepthData) return;
+
+  const { sign_heading, road_bearing, alpha_deg, ground_samples } = currentDepthData;
+
+  const bestDet = currentDetections.length > 0
+    ? currentDetections.reduce((a, b) => a.confidence > b.confidence ? a : b)
+    : null;
+  const signPitch = bestDet?.pitch;
+
+  let signDist = null;
+  let groundProjectionPitch = -30; // default fallback
+  let distSource = "none";
+
+  // Primary: depth-map based distance (from backend sign-level sampling)
+  if (currentDepthData.sign_horiz_dist_m != null && currentDepthData.sign_horiz_dist_m > 0) {
+    signDist = currentDepthData.sign_horiz_dist_m;
+    distSource = "depth";
+  }
+
+  // Fallback: pitch-based calibration model
+  if (signDist == null) {
+    const deltaH = fitDeltaH();
+    if (deltaH != null && signPitch != null && Math.abs(signPitch) > 0.1) {
+      const rawDist = deltaH / Math.tan((-signPitch * Math.PI) / 180);
+      if (rawDist > 0) {
+        signDist = rawDist;
+        distSource = "pitch-model";
+      }
+    }
+  }
+
+  let displayCurb = null;
+  let displayAlong = null;
+
+  if (signDist != null) {
+    groundProjectionPitch = -(Math.atan(CAMERA_HEIGHT_M / signDist) * 180) / Math.PI;
+    displayCurb = Math.abs(signDist * Math.sin((alpha_deg * Math.PI) / 180));
+    displayAlong = signDist * Math.cos((alpha_deg * Math.PI) / 180);
+  } else {
+    displayCurb = currentDepthData.curb_distance_m;
+    displayAlong = currentDepthData.along_road_m;
+  }
 
   // Draw road bearing reference line (yellow dashed)
+  const roadHorizonPt = toScreen(road_bearing, 0);
+  const roadGroundPt = toScreen(road_bearing, -30);
   if (roadHorizonPt && roadGroundPt) {
     overlay.appendChild(mkLine(roadHorizonPt.x, roadHorizonPt.y, roadGroundPt.x, roadGroundPt.y, "#facc15", "2", "6,4"));
     const roadLabelPt = toScreen(road_bearing, -5);
@@ -1135,26 +1268,29 @@ function renderDepthOverlay(overlay, pov, fov, screenWidth, screenHeight) {
     }
   }
 
-  // Draw sign heading line (cyan solid)
-  if (signHorizonPt && signGroundPt) {
-    overlay.appendChild(mkLine(signHorizonPt.x, signHorizonPt.y, signGroundPt.x, signGroundPt.y, "#22d3ee", "2.5", null));
+  // Draw sign heading line from sign to ground projection
+  const signDetPt = bestDet ? toScreen(sign_heading, bestDet.pitch) : toScreen(sign_heading, 0);
+  const signGroundPt = toScreen(sign_heading, groundProjectionPitch);
+  if (signDetPt && signGroundPt) {
+    overlay.appendChild(mkLine(signDetPt.x, signDetPt.y, signGroundPt.x, signGroundPt.y, "#22d3ee", "2.5", null));
   }
 
-  // Draw ground sample points along the sign heading
+  // Draw ground projection point
+  if (signGroundPt && signDist != null) {
+    const color = distSource === "depth" ? "#22d3ee" : "#f472b6";
+    overlay.appendChild(mkCircle(signGroundPt.x, signGroundPt.y, 6, color));
+    const label = `${signDist.toFixed(1)}m (${distSource})`;
+    overlay.appendChild(mkText(signGroundPt.x + 10, signGroundPt.y - 2, label, color, "11", "start"));
+  }
+
+  // Draw depth map ground samples as small dots (for reference)
   for (const sample of ground_samples) {
     const pt = toScreen(sign_heading, sample.pitch);
     if (!pt) continue;
-    const isRepresentative = Math.abs(sample.pitch - (-30)) < 3;
-    const color = isRepresentative ? "#f472b6" : "#22d3ee";
-    const radius = isRepresentative ? 5 : 3;
-    overlay.appendChild(mkCircle(pt.x, pt.y, radius, color));
-
-    if (isRepresentative) {
-      overlay.appendChild(mkText(pt.x + 10, pt.y - 2, `${sample.horiz_dist}m horiz`, "#f472b6", "12", "start"));
-    }
+    overlay.appendChild(mkCircle(pt.x, pt.y, 2, "rgba(34, 211, 238, 0.5)"));
   }
 
-  // Draw sign-level sample points
+  // Draw sign-level depth samples
   for (const sample of (currentDepthData.sign_samples || [])) {
     const pt = toScreen(sign_heading, sample.pitch);
     if (!pt) continue;
@@ -1162,60 +1298,64 @@ function renderDepthOverlay(overlay, pov, fov, screenWidth, screenHeight) {
     overlay.appendChild(mkText(pt.x + 10, pt.y + 4, `${sample.raw_depth.toFixed(1)}m`, "#a78bfa", "10", "start"));
   }
 
-  // Draw angle arc between road and sign heading at the horizon
-  const arcCenter = toScreen((road_bearing + sign_heading) / 2, -2);
-  if (arcCenter && Math.abs(alpha_deg) > 5) {
-    // Draw a small arc indicator using intermediate heading points
-    const steps = 8;
-    const startH = road_bearing;
-    const endH = sign_heading;
-    let deltaH = (endH - startH) % 360;
-    if (deltaH > 180) deltaH -= 360;
-    if (deltaH < -180) deltaH += 360;
-
-    let prevPt = toScreen(startH, -2);
-    for (let i = 1; i <= steps; i++) {
-      const h = startH + (deltaH * i) / steps;
-      const curPt = toScreen(h, -2);
+  // Draw full 360° dashed orange horizon line at pitch=0
+  {
+    let prevPt = toScreen(0, 0);
+    for (let i = 1; i <= 360; i++) {
+      const curPt = toScreen(i, 0);
       if (prevPt && curPt) {
         overlay.appendChild(mkLine(prevPt.x, prevPt.y, curPt.x, curPt.y, "#fb923c", "1.5", "3,3"));
       }
       prevPt = curPt;
     }
-    // Angle label at midpoint
-    const midH = startH + deltaH / 2;
+  }
+
+  // Draw angle arc label between road and sign heading
+  if (Math.abs(alpha_deg) > 5) {
+    const startH = road_bearing;
+    const endH = sign_heading;
+    let deltaHAngle = (endH - startH) % 360;
+    if (deltaHAngle > 180) deltaHAngle -= 360;
+    if (deltaHAngle < -180) deltaHAngle += 360;
+
+    const midH = startH + deltaHAngle / 2;
     const midPt = toScreen(midH, -5);
     if (midPt) {
       overlay.appendChild(mkText(midPt.x, midPt.y, `α=${Math.abs(alpha_deg).toFixed(1)}°`, "#fb923c", "12", "middle"));
     }
   }
 
-  // Info box at bottom-right showing computed distances
-  if (curb_distance_m != null || along_road_m != null) {
-    const boxX = screenWidth - 220;
-    const boxY = screenHeight - 90;
+  // Info box
+  if (displayCurb != null || displayAlong != null) {
+    const boxW = 240;
+    const boxH = 98;
+    const boxX = screenWidth - boxW - 10;
+    const boxY = screenHeight - boxH - 10;
+    const borderColor = distSource === "depth" ? "#22d3ee" : "#f472b6";
     const bg = document.createElementNS(SVG_NS, "rect");
     bg.setAttribute("x", boxX);
     bg.setAttribute("y", boxY);
-    bg.setAttribute("width", 210);
-    bg.setAttribute("height", 80);
+    bg.setAttribute("width", boxW);
+    bg.setAttribute("height", boxH);
     bg.setAttribute("rx", 6);
     bg.setAttribute("fill", "rgba(0,0,0,0.75)");
-    bg.setAttribute("stroke", "#22d3ee");
+    bg.setAttribute("stroke", borderColor);
     bg.setAttribute("stroke-width", "1");
     bg.classList.add("depth-overlay");
     overlay.appendChild(bg);
 
     let lineY = boxY + 18;
-    overlay.appendChild(mkText(boxX + 10, lineY, "DEPTH MEASUREMENT", "#22d3ee", "11", "start"));
+    const sourceLabel = distSource === "depth" ? "DEPTH MAP" : distSource === "pitch-model" ? "PITCH MODEL" : "GROUND DEPTH";
+    overlay.appendChild(mkText(boxX + 10, lineY, sourceLabel, borderColor, "11", "start"));
     lineY += 18;
-    if (curb_distance_m != null)
-      overlay.appendChild(mkText(boxX + 10, lineY, `Curb dist: ${curb_distance_m.toFixed(1)}m`, "#f472b6", "13", "start"));
+    if (displayCurb != null)
+      overlay.appendChild(mkText(boxX + 10, lineY, `Curb dist: ${displayCurb.toFixed(1)}m`, "#f472b6", "13", "start"));
     lineY += 18;
-    if (along_road_m != null)
-      overlay.appendChild(mkText(boxX + 10, lineY, `Along road: ${along_road_m.toFixed(1)}m`, "#4ade80", "13", "start"));
+    if (displayAlong != null)
+      overlay.appendChild(mkText(boxX + 10, lineY, `Along road: ${displayAlong.toFixed(1)}m`, "#4ade80", "13", "start"));
     lineY += 18;
-    overlay.appendChild(mkText(boxX + 10, lineY, `vs fixed: 3.1m`, "#94a3b8", "11", "start"));
+    if (signDist != null)
+      overlay.appendChild(mkText(boxX + 10, lineY, `Sign dist: ${signDist.toFixed(1)}m (${distSource})`, "#94a3b8", "11", "start"));
   }
 }
 
@@ -1483,6 +1623,7 @@ function requestPanoramaLinkSpotPosition(currentPanoId, link) {
  * Initialize or update the detection panorama.
  */
 function initDetectionPanorama(panoId, heading, container) {
+  loadCalibrationData();
   const pov = getDefaultPov(heading);
 
   if (detectionPanorama) {
@@ -1542,8 +1683,7 @@ function initDetectionPanorama(panoId, heading, container) {
   }
 
   currentDetections = [];
-  markedPoints = [];
-  cachedPanoMetadata = null;
+  pendingBaseMark = null;
   updateDetectionOverlay();
 }
 
@@ -1551,14 +1691,10 @@ function initDetectionPanorama(panoId, heading, container) {
  * Handle keyboard shortcuts for marker management.
  */
 function handleMarkerKeyboard(event) {
-  if (event.key === "Escape" && markedPoints.length > 0) {
+  if (event.key === "Escape") {
     clearMarkedPoints();
-    const statusEl =
-      document.getElementById("status") ||
-      document.getElementById("detectionStatus");
-    if (statusEl)
-      statusEl.textContent =
-        "Markers cleared. Ctrl+click to mark sign centers.";
+    const statusEl = document.getElementById("detectionStatus");
+    if (statusEl) statusEl.textContent = "Calibration markers cleared.";
   }
 }
 
@@ -3374,3 +3510,4 @@ function cleanupDetectionPanorama() {
     document.getElementById("detectionOverlay").innerHTML = "";
   }
 }
+
