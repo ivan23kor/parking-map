@@ -1,3 +1,8 @@
+---
+description: 
+alwaysApply: true
+---
+
 # AGENTS.md
 
 This file provides guidance when working with code in this repository.
