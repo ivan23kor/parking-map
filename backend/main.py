@@ -7,11 +7,14 @@ import asyncio
 import io
 import math
 import re
+import json as _json
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
+
+import logging
 
 import httpx
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -30,6 +33,8 @@ DETECTED_SIGNS_DIR.mkdir(exist_ok=True)
 print(f"Loading model from: {MODEL_PATH}")
 model = YOLO(str(MODEL_PATH))
 print(f"Model loaded. Classes: {model.names}")
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Parking Sign Detection API")
 app.mount("/detected-signs", StaticFiles(directory=str(DETECTED_SIGNS_DIR)), name="detected-signs")
@@ -380,6 +385,16 @@ async def fetch_zoomed_sign_image(
 async def health():
     """Health check endpoint."""
     return {"status": "ok", "model": str(MODEL_PATH.name)}
+
+
+DUMP_PATH = Path("/tmp/parksight-dump.json")
+
+
+@app.post("/dump")
+async def save_dump(body: dict):
+    """Save frontend state dump to a well-known file for agent reading."""
+    DUMP_PATH.write_text(_json.dumps(body, indent=2))
+    return {"ok": True, "path": str(DUMP_PATH)}
 
 
 TILE_SIZE = 512  # Street View tile size
@@ -912,7 +927,10 @@ CAMERA_HEIGHT_M = 2.5  # Google SV car camera height above ground
 class DepthRequest(BaseModel):
     pano_id: str
     sign_heading: float
+    sign_pitch: Optional[float] = None
+    sign_angular_height: Optional[float] = None
     road_bearing: float
+    api_key: Optional[str] = None
 
 
 class DepthSample(BaseModel):
@@ -932,6 +950,7 @@ class DepthResponse(BaseModel):
     alpha_deg: float
     ground_samples: list[DepthSample]
     sign_samples: list[DepthSample]
+    sign_horiz_dist_m: Optional[float] = None
     curb_distance_m: Optional[float] = None
     along_road_m: Optional[float] = None
 
@@ -1050,15 +1069,51 @@ def _sample_depth(width, height, planes, indices, heading_deg, pitch_deg):
     return abs(d / denom), pidx
 
 
+CAMERA_HEIGHT_M = 2.5
+
+
+def _estimate_sign_distance(
+    sign_samples: list[DepthSample],
+    sign_pitch: float | None,
+    sign_angular_height: float | None,
+) -> float | None:
+    """Pick the best horizontal-distance estimate from sign-level depth samples.
+
+    Strategy:
+    1. Prefer samples near the actual sign pitch (within ±2° of center).
+    2. Among those, take the median horiz_dist to filter outliers from
+       background surfaces that are further away.
+    3. Reject samples whose horiz_dist < camera-to-ground (too close to be a
+       sign on the sidewalk) or > 200m (unreasonable).
+    """
+    if not sign_samples:
+        return None
+
+    candidates = [
+        s for s in sign_samples
+        if 1.0 < s.horiz_dist < 200.0
+    ]
+    if not candidates:
+        return None
+
+    if sign_pitch is not None:
+        near = [s for s in candidates if abs(s.pitch - sign_pitch) <= 2.0]
+        if near:
+            candidates = near
+
+    dists = sorted(s.horiz_dist for s in candidates)
+    return dists[len(dists) // 2]
+
+
 @app.post("/depth", response_model=DepthResponse)
 async def get_depth(req: DepthRequest):
     """Fetch and sample depth map for a panorama."""
-    raw = _fetch_depth_data(req.pano_id)
-    if not raw:
+    parsed = _get_depth_for_pano(req.pano_id, req.api_key)
+    if not parsed:
         raise HTTPException(status_code=404, detail="Depth data unavailable for this panorama")
 
-    decoded = _decode_depth(raw)
-    w, h, num_planes, planes, indices = _parse_depth_map(decoded)
+    w, h, planes, indices = parsed
+    num_planes = len(planes)
 
     sign_h = req.sign_heading % 360
     alpha = (sign_h - req.road_bearing) % 360
@@ -1066,7 +1121,15 @@ async def get_depth(req: DepthRequest):
         alpha -= 360
 
     ground_pitches = [-20, -25, -30, -35, -40, -45, -50, -60]
-    sign_pitches = [5, 0, -5, -10]
+
+    sign_pitches_set: set[float] = {5, 0, -5, -10}
+    if req.sign_pitch is not None:
+        sp = req.sign_pitch
+        sign_pitches_set.update([sp, sp - 1, sp + 1])
+        if req.sign_angular_height is not None:
+            half_h = req.sign_angular_height / 2
+            sign_pitches_set.update([sp - half_h, sp + half_h])
+    sign_pitches = sorted(sign_pitches_set, reverse=True)
 
     ground_samples = []
     for p in ground_pitches:
@@ -1088,12 +1151,19 @@ async def get_depth(req: DepthRequest):
                 plane_idx=pidx,
             ))
 
+    sign_horiz_dist = _estimate_sign_distance(
+        sign_samples, req.sign_pitch, req.sign_angular_height
+    )
+
     curb_dist = None
     along_road = None
-    best = [s for s in ground_samples if -40 <= s.pitch <= -25]
-    if best:
-        representative = min(best, key=lambda s: abs(s.pitch - (-30)))
-        h_dist = representative.horiz_dist
+    h_dist = sign_horiz_dist
+    if h_dist is None:
+        best = [s for s in ground_samples if -40 <= s.pitch <= -25]
+        if best:
+            representative = min(best, key=lambda s: abs(s.pitch - (-30)))
+            h_dist = representative.horiz_dist
+    if h_dist is not None:
         curb_dist = round(abs(h_dist * math.sin(math.radians(alpha))), 2)
         along_road = round(h_dist * math.cos(math.radians(alpha)), 2)
 
@@ -1104,8 +1174,94 @@ async def get_depth(req: DepthRequest):
         alpha_deg=round(alpha, 1),
         ground_samples=ground_samples,
         sign_samples=sign_samples,
+        sign_horiz_dist_m=round(sign_horiz_dist, 2) if sign_horiz_dist else None,
         curb_distance_m=curb_dist,
         along_road_m=along_road,
+    )
+
+
+class DepthSampleRequest(BaseModel):
+    pano_id: str
+    heading: float
+    pitch: float
+    api_key: Optional[str] = None
+
+
+class DepthSampleResponse(BaseModel):
+    raw_depth: Optional[float] = None
+    horiz_dist: Optional[float] = None
+    plane_idx: int = -1
+
+
+_depth_cache: dict[str, tuple] = {}
+_pano_id_map: dict[str, str] = {}
+
+
+def _resolve_classic_pano_id(pano_id: str, api_key: str) -> str | None:
+    """Try to resolve a newer pano_id to a classic outdoor format via Google metadata API."""
+    import requests as sync_requests
+
+    if pano_id in _pano_id_map:
+        return _pano_id_map[pano_id]
+
+    url = "https://maps.googleapis.com/maps/api/streetview/metadata"
+    params = {"pano": pano_id, "key": api_key, "source": "outdoor"}
+    try:
+        resp = sync_requests.get(url, params=params, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            classic_id = data.get("pano_id")
+            if classic_id and classic_id != pano_id:
+                logger.info("Resolved pano %s → classic %s", pano_id, classic_id)
+                _pano_id_map[pano_id] = classic_id
+                return classic_id
+    except Exception as exc:
+        logger.warning("Classic pano resolution failed for %s: %s", pano_id, exc)
+    return None
+
+
+def _get_depth_for_pano(pano_id: str, api_key: str | None = None) -> tuple | None:
+    """Fetch and parse depth data, with caching and classic-ID fallback."""
+    if pano_id in _depth_cache:
+        return _depth_cache[pano_id]
+
+    raw = _fetch_depth_data(pano_id)
+
+    if not raw and api_key:
+        classic_id = _resolve_classic_pano_id(pano_id, api_key)
+        if classic_id:
+            if classic_id in _depth_cache:
+                _depth_cache[pano_id] = _depth_cache[classic_id]
+                return _depth_cache[pano_id]
+            raw = _fetch_depth_data(classic_id)
+
+    if not raw:
+        logger.warning("No depth data for pano_id=%s", pano_id)
+        return None
+
+    decoded = _decode_depth(raw)
+    w, h, _np, planes, indices = _parse_depth_map(decoded)
+    result = (w, h, planes, indices)
+    _depth_cache[pano_id] = result
+    return result
+
+
+@app.post("/depth-sample", response_model=DepthSampleResponse)
+async def get_depth_sample(req: DepthSampleRequest):
+    """Sample depth at an arbitrary heading+pitch for a panorama."""
+    parsed = _get_depth_for_pano(req.pano_id, req.api_key)
+    if not parsed:
+        return DepthSampleResponse()
+
+    w, h, planes, indices = parsed
+    d, pidx = _sample_depth(w, h, planes, indices, req.heading, req.pitch)
+    if d is None or d >= 1000:
+        return DepthSampleResponse()
+
+    return DepthSampleResponse(
+        raw_depth=round(d, 3),
+        horiz_dist=round(d * math.cos(math.radians(req.pitch)), 3),
+        plane_idx=pidx,
     )
 
 
