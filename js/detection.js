@@ -381,6 +381,7 @@ function mergeAngularDetections(detections) {
     angularHeight: mergedAngularHeight,
     confidence,
     class_name: className,
+    depth_m: detections[0].depth_m,
     sourceDetections: normalizedDetections.reduce(
       (sum, det) => sum + (det.sourceDetections || 1),
       0,
@@ -1903,6 +1904,7 @@ async function runDetectionOnPanorama(
               angularHeight: det.angular_height,
               confidence: det.confidence,
               class_name: det.class_name,
+              depth_m: det.depth_m,
             })),
           )
         : result.detections;
@@ -3494,6 +3496,7 @@ function estimateAllSignLocations(cameraLat, cameraLng, options = null) {
         angularHeight: det.angularHeight,
         distanceAngularHeight: resolveDetectionDistanceAngularHeight(det),
         pitch: det.pitch,
+        depth_m: det.depth_m,
         sourceDetections: det.sourceDetections || 1,
         mergeStackFactor: det.mergeStackFactor || 0,
       };
