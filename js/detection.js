@@ -1339,8 +1339,9 @@ function renderDepthOverlay(overlay, pov, fov, screenWidth, screenHeight) {
 
   // Info box
   {
+    const hasV2Depth = bestDet && Number.isFinite(bestDet.depth_m);
     const boxW = 260;
-    const boxH = 100;
+    const boxH = hasV2Depth ? 118 : 100;
     const boxX = screenWidth - boxW - 10;
     const boxY = screenHeight - boxH - 10;
     const borderColor = "#22d3ee";
@@ -1361,6 +1362,12 @@ function renderDepthOverlay(overlay, pov, fov, screenWidth, screenHeight) {
     lineY += 18;
     const signLabel = currentDepthData._forCalibration ? "calibrated" : "best";
     overlay.appendChild(mkText(boxX + 10, lineY, `Sign dist: ${signDist.toFixed(1)}m (${signLabel})`, "#94a3b8", "12", "start"));
+
+    if (hasV2Depth) {
+      lineY += 18;
+      overlay.appendChild(mkText(boxX + 10, lineY, `V2 Depth: ${bestDet.depth_m.toFixed(1)}m (DAv2)`, "#0891b2", "12", "start"));
+    }
+
     lineY += 18;
     overlay.appendChild(mkText(boxX + 10, lineY, `Curb dist: ${displayCurb.toFixed(1)}m \u22A5 to road`, "#f472b6", "11", "start"));
     lineY += 18;
@@ -1458,14 +1465,16 @@ function updateDetectionOverlay() {
     overlay.appendChild(rect);
 
     // Create label
-    const label = `${det.class_name} ${Math.round(det.confidence * 100)}%`;
+    const depthLabel = det.depth_m ? ` | ${det.depth_m.toFixed(1)}m` : "";
+    const label = `${det.class_name} ${Math.round(det.confidence * 100)}%${depthLabel}`;
+
     const labelBg = document.createElementNS(
       "http://www.w3.org/2000/svg",
       "rect",
     );
     labelBg.setAttribute("x", screen.x);
     labelBg.setAttribute("y", screen.y - 20);
-    labelBg.setAttribute("width", label.length * 8 + 8);
+    labelBg.setAttribute("width", label.length * 7.5 + 10);
     labelBg.setAttribute("height", "18");
     labelBg.setAttribute("fill", color);
     overlay.appendChild(labelBg);
@@ -1478,6 +1487,9 @@ function updateDetectionOverlay() {
     text.setAttribute("font-weight", "bold");
     text.textContent = label;
     overlay.appendChild(text);
+
+    // Add title for native hover tooltip
+    rect.innerHTML = `<title>${det.class_name}\nConfidence: ${Math.round(det.confidence * 100)}%\nDepth (DAv2): ${det.depth_m ? det.depth_m.toFixed(2) + "m" : "N/A"}</title>`;
   }
 }
 
