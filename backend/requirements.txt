@@ -4,3 +4,6 @@ ultralytics>=8.0.0
 pillow>=10.0.0
 httpx>=0.25.0
 requests>=2.31.0
+torch
+transformers
+accelerate
