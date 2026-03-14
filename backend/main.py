@@ -12,8 +12,6 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-import torch
-from transformers import pipeline as hf_pipeline
 from urllib.parse import parse_qs, urlparse
 
 import logging
@@ -35,15 +33,6 @@ DETECTED_SIGNS_DIR.mkdir(exist_ok=True)
 print(f"Loading model from: {MODEL_PATH}")
 model = YOLO(str(MODEL_PATH))
 print(f"Model loaded. Classes: {model.names}")
-
-# Load Depth Anything v2 metric outdoor small
-print("Loading depth model: depth-anything-v2-metric-outdoor-small-hf")
-depth_model = hf_pipeline(
-    task="depth-estimation",
-    model="depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf",
-    device=0 if torch.cuda.is_available() else -1,
-)
-print("Depth model loaded.")
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +131,6 @@ class AngularDetection(BaseModel):
     angular_height: float
     confidence: float
     class_name: str
-    depth_m: Optional[float] = None  # metric depth at detection center
 
 
 class SahiRequest(BaseModel):
@@ -854,13 +842,6 @@ async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
 
         start_time = time.time()
         yolo_results = model.predict(image, conf=request.confidence, verbose=False)
-
-        # Run depth estimation on the same image
-        depth_result = depth_model(image)
-        depth_map = depth_result["predicted_depth"]  # [1, H, W]
-        if torch.is_tensor(depth_map):
-            depth_map = depth_map.squeeze().cpu().numpy()
-
         total_inference_ms += (time.time() - start_time) * 1000
 
         for r in yolo_results:
@@ -874,8 +855,6 @@ async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
                 # Detection center and size in pixels
                 cx = (x1 + x2) / 2
                 cy = (y1 + y2) / 2
-                det_w = x2 - x1
-                det_h = y2 - y1
 
                 # Convert center to angular coords
                 center_heading, center_pitch = pixel_to_angular(
@@ -901,11 +880,6 @@ async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
                 # Angular height: average of left and right edge spans
                 ang_h = abs(((tl_p - bl_p) + (tr_p - br_p)) / 2)
 
-                # Sample depth at bounding box center
-                cx_px = int(max(0, min(img_w - 1, cx)))
-                cy_px = int(max(0, min(img_h - 1, cy)))
-                sign_depth = float(depth_map[cy_px, cx_px])
-
                 all_angular_dets.append(AngularDetection(
                     heading=center_heading,
                     pitch=center_pitch,
@@ -913,7 +887,6 @@ async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
                     angular_height=ang_h,
                     confidence=conf,
                     class_name=cls_name,
-                    depth_m=sign_depth,
                 ))
 
     print(f"Panorama detect: {len(all_angular_dets)} raw detections before NMS")
