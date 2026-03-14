@@ -316,11 +316,6 @@
         border-top: 1px solid #e5e7eb;
       }
 
-      .depth-v2 {
-        color: #0891b2;
-        font-weight: bold;
-      }
-
       .sign-preview-popup .preview-loading,
       .sign-preview-popup .preview-error {
         color: #4b5563;
@@ -1155,7 +1150,6 @@
                 <img src="${state.src}" alt="Detected parking sign preview">
                 <div class="sign-info">
                   <span>Est: ${sign.distance?.toFixed(1)}m</span>
-                  ${sign.depth_m ? `<span class="depth-v2" title="Depth Anything v2 estimation">Depth: ${sign.depth_m.toFixed(1)}m</span>` : ""}
                 </div>
             `;
       }
