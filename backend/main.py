@@ -17,11 +17,14 @@ from urllib.parse import parse_qs, urlparse
 import logging
 
 import httpx
+import numpy as np
+import torch
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageDraw
 from pydantic import BaseModel
+from transformers import pipeline
 from ultralytics import YOLO
 
 # Paths
@@ -29,10 +32,20 @@ MODEL_PATH = Path(__file__).parent / "models" / "best.pt"
 DETECTED_SIGNS_DIR = Path(__file__).parent.parent / "detected_signs"
 DETECTED_SIGNS_DIR.mkdir(exist_ok=True)
 
-# Load model at startup
+# Load YOLO model at startup
 print(f"Loading model from: {MODEL_PATH}")
 model = YOLO(str(MODEL_PATH))
 print(f"Model loaded. Classes: {model.names}")
+
+# Load Depth Anything V2 model at startup
+_depth_device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Loading Depth Anything V2 on {_depth_device}...")
+depth_model = pipeline(
+    "depth-estimation",
+    model="depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf",
+    device=_depth_device,
+)
+print("Depth Anything V2 loaded.")
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +144,8 @@ class AngularDetection(BaseModel):
     angular_height: float
     confidence: float
     class_name: str
+    depth_m: Optional[float] = None
+    depth_m_raw: Optional[float] = None
 
 
 class SahiRequest(BaseModel):
@@ -145,6 +160,7 @@ class SahiRequest(BaseModel):
     api_key: str
     img_width: int = 640
     img_height: int = 640
+    sign_panel_height_m: float = 0.45
 
 
 class SahiResponse(BaseModel):
@@ -844,6 +860,18 @@ async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
         yolo_results = model.predict(image, conf=request.confidence, verbose=False)
         total_inference_ms += (time.time() - start_time) * 1000
 
+        # Run depth estimation once per slice (only if detections found)
+        slice_has_dets = any(r.boxes is not None and len(r.boxes) > 0 for r in yolo_results)
+        depth_map = None
+        if slice_has_dets:
+            try:
+                depth_start = time.time()
+                depth_result = depth_model(image)
+                depth_map = depth_result["depth"]  # PIL Image with metric depth
+                total_inference_ms += (time.time() - depth_start) * 1000
+            except Exception as e:
+                print(f"Panorama detect: depth estimation failed for slice {slice_heading:.1f}°: {e}")
+
         for r in yolo_results:
             if r.boxes is None:
                 continue
@@ -855,6 +883,18 @@ async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
                 # Detection center and size in pixels
                 cx = (x1 + x2) / 2
                 cy = (y1 + y2) / 2
+
+                # Sample depth at bbox center
+                det_depth_m_raw = None
+                det_depth_m = None
+                if depth_map is not None:
+                    try:
+                        depth_arr = np.array(depth_map)
+                        px_x = int(min(max(cx, 0), depth_arr.shape[1] - 1))
+                        px_y = int(min(max(cy, 0), depth_arr.shape[0] - 1))
+                        det_depth_m_raw = float(depth_arr[px_y, px_x])
+                    except Exception as e:
+                        print(f"Panorama detect: depth sampling failed: {e}")
 
                 # Convert center to angular coords
                 center_heading, center_pitch = pixel_to_angular(
@@ -880,6 +920,13 @@ async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
                 # Angular height: average of left and right edge spans
                 ang_h = abs(((tl_p - bl_p) + (tr_p - br_p)) / 2)
 
+                # Calibrate depth using sign panel height reference
+                if det_depth_m_raw is not None and ang_h > 0:
+                    ang_h_rad = math.radians(ang_h)
+                    apparent_height_m = 2 * det_depth_m_raw * math.tan(ang_h_rad / 2)
+                    if apparent_height_m > 0:
+                        det_depth_m = det_depth_m_raw * (request.sign_panel_height_m / apparent_height_m)
+
                 all_angular_dets.append(AngularDetection(
                     heading=center_heading,
                     pitch=center_pitch,
@@ -887,6 +934,8 @@ async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
                     angular_height=ang_h,
                     confidence=conf,
                     class_name=cls_name,
+                    depth_m=det_depth_m,
+                    depth_m_raw=det_depth_m_raw,
                 ))
 
     print(f"Panorama detect: {len(all_angular_dets)} raw detections before NMS")

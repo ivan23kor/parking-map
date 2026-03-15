@@ -15,9 +15,6 @@ const documentEventListeners = [];
 const panoramaLinkSpotPositionCache = new Map();
 const panoramaLinkSpotRequestsInFlight = new Set();
 
-// Depth measurement state
-let currentDepthData = null; // Cached depth response for current panorama + detection
-
 // Calibration state
 let calibrationMode = false;
 let calibrationData = []; // Reference points: {pano_id, sign_heading, sign_pitch, base_heading, base_pitch, depth_at_base, horiz_dist, timestamp}
@@ -91,29 +88,6 @@ function toggleCalibrationMode() {
   if (calibrationMode) {
     loadCalibrationData();
     renderCalibrationPanel();
-    if (
-      calibrationData.length > 0 &&
-      currentDetections.length > 0 &&
-      typeof currentDetectionContext !== "undefined" &&
-      currentDetectionContext &&
-      Number.isFinite(currentDetectionContext.streetBearing)
-    ) {
-      const last = calibrationData[calibrationData.length - 1];
-      let nearest = null;
-      let minDist = Infinity;
-      for (const det of currentDetections) {
-        let dh = Math.abs(det.heading - last.sign_heading);
-        if (dh > 180) dh = 360 - dh;
-        if (dh < minDist) {
-          minDist = dh;
-          nearest = det;
-        }
-      }
-      if (nearest && minDist < 30) {
-        fetchDepthForDetection(nearest, currentDetectionContext.streetBearing, true);
-        return;
-      }
-    }
   }
   updateDetectionOverlay();
 }
@@ -382,6 +356,7 @@ function mergeAngularDetections(detections) {
     confidence,
     class_name: className,
     depth_m: detections[0].depth_m,
+    depth_m_raw: detections[0].depth_m_raw,
     sourceDetections: normalizedDetections.reduce(
       (sum, det) => sum + (det.sourceDetections || 1),
       0,
@@ -1028,75 +1003,42 @@ async function handleSignMarking(event) {
       return;
     }
 
-    const apiUrl = window.DETECTION_CONFIG?.API_URL;
-    const panoId = detectionPanorama.getPano();
-    if (!apiUrl || !panoId) {
+    // Use CNN depth from detection if available, otherwise estimate from pitch
+    const horizDist = nearest.depth_m != null
+      ? nearest.depth_m * Math.cos(Math.atan2(
+          Math.sin((nearest.heading - pendingBaseMark.heading) * Math.PI / 180),
+          Math.cos((nearest.heading - pendingBaseMark.heading) * Math.PI / 180)))
+      : estimateSignDistance(nearest.pitch);
+
+    if (horizDist == null) {
+      if (statusEl) statusEl.textContent = "No depth data — need CNN depth or pitch calibration";
       pendingBaseMark = null;
       return;
     }
 
-    if (statusEl) statusEl.textContent = "Sampling depth at sign base...";
+    const refPoint = {
+      pano_id: detectionPanorama.getPano(),
+      sign_heading: nearest.heading,
+      sign_pitch: nearest.pitch,
+      base_heading: pendingBaseMark.heading,
+      base_pitch: pendingBaseMark.pitch,
+      depth_at_base: nearest.depth_m_raw || nearest.depth_m || horizDist,
+      horiz_dist: horizDist,
+      timestamp: Date.now(),
+    };
 
-    try {
-      const resp = await fetch(`${apiUrl}/depth-sample`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          pano_id: panoId,
-          heading: pendingBaseMark.heading,
-          pitch: pendingBaseMark.pitch,
-          api_key: window.GOOGLE_CONFIG?.API_KEY || null,
-        }),
-      });
-      if (!resp.ok) {
-        if (statusEl) statusEl.textContent = "Depth sample failed";
-        pendingBaseMark = null;
-        return;
-      }
-      const depthResult = await resp.json();
+    calibrationData.push(refPoint);
+    saveCalibrationData();
+    renderCalibrationPanel();
+    updateDetectionOverlay();
 
-      if (depthResult.horiz_dist == null) {
-        if (statusEl) statusEl.textContent = "No depth data at base — try a different panorama";
-        console.warn("[Calibration] No depth data returned for pano", panoId);
-        pendingBaseMark = null;
-        return;
-      }
-
-      const refPoint = {
-        pano_id: panoId,
-        sign_heading: nearest.heading,
-        sign_pitch: nearest.pitch,
-        base_heading: pendingBaseMark.heading,
-        base_pitch: pendingBaseMark.pitch,
-        depth_at_base: depthResult.raw_depth,
-        horiz_dist: depthResult.horiz_dist,
-        timestamp: Date.now(),
-      };
-
-      calibrationData.push(refPoint);
-      saveCalibrationData();
-      renderCalibrationPanel();
-      const roadBearing =
-        typeof currentDetectionContext !== "undefined" && currentDetectionContext
-          ? currentDetectionContext.streetBearing
-          : null;
-      if (Number.isFinite(roadBearing)) {
-        fetchDepthForDetection(nearest, roadBearing, true);
-      } else {
-        updateDetectionOverlay();
-      }
-
-      const dh = refPoint.horiz_dist * Math.tan((-refPoint.sign_pitch * Math.PI) / 180);
-      const btn = document.getElementById("calibrateBtn");
-      if (btn) btn.textContent = `Calibrating (${calibrationData.length})`;
-      if (statusEl) {
-        statusEl.textContent =
-          `Ref #${calibrationData.length}: dist=${refPoint.horiz_dist.toFixed(1)}m, ` +
-          `Δh=${dh.toFixed(2)}m, sign_pitch=${refPoint.sign_pitch.toFixed(1)}°`;
-      }
-    } catch (err) {
-      console.warn("Calibration depth sample error:", err);
-      if (statusEl) statusEl.textContent = "Calibration depth sample error";
+    const dh = refPoint.horiz_dist * Math.tan((-refPoint.sign_pitch * Math.PI) / 180);
+    const btn = document.getElementById("calibrateBtn");
+    if (btn) btn.textContent = `Calibrating (${calibrationData.length})`;
+    if (statusEl) {
+      statusEl.textContent =
+        `Ref #${calibrationData.length}: dist=${refPoint.horiz_dist.toFixed(1)}m, ` +
+        `Δh=${dh.toFixed(2)}m, sign_pitch=${refPoint.sign_pitch.toFixed(1)}°`;
     }
 
     pendingBaseMark = null;
@@ -1157,44 +1099,8 @@ function clearMarkedPoints() {
 }
 
 /**
- * Fetch depth data for a detected sign and cache it.
- */
-async function fetchDepthForDetection(det, roadBearing, forCalibration = false) {
-  const panoId = detectionPanorama?.getPano?.();
-  const apiUrl = window.DETECTION_CONFIG?.API_URL;
-  if (!panoId || !apiUrl || !Number.isFinite(det.heading) || !Number.isFinite(roadBearing)) return;
-
-  try {
-    const resp = await fetch(`${apiUrl}/depth`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        pano_id: panoId,
-        sign_heading: det.heading,
-        sign_pitch: det.pitch,
-        road_bearing: roadBearing,
-        api_key: window.GOOGLE_CONFIG?.API_KEY || null,
-      }),
-    });
-    if (!resp.ok) {
-      console.warn("Depth fetch failed:", resp.status);
-      return;
-    }
-    currentDepthData = await resp.json();
-    currentDepthData._forCalibration = forCalibration;
-    updateDetectionOverlay();
-  } catch (err) {
-    console.warn("Depth fetch error:", err);
-  }
-}
-
-/**
- * Render depth measurement overlay lines on the panorama SVG.
- * Draws:
- * - A line from the camera (bottom center) down to the ground at sign heading
- * - The road bearing reference line
- * - The angle arc between road bearing and sign heading
- * - Distance and angle labels
+ * Render depth measurement overlay on the panorama SVG.
+ * Shows calibration guide lines when in calibration mode.
  */
 function renderDepthOverlay(overlay, pov, fov, screenWidth, screenHeight) {
   const SVG_NS = "http://www.w3.org/2000/svg";
@@ -1212,30 +1118,6 @@ function renderDepthOverlay(overlay, pov, fov, screenWidth, screenHeight) {
     return line;
   };
 
-  const mkText = (x, y, text, color, size, anchor) => {
-    const el = document.createElementNS(SVG_NS, "text");
-    el.setAttribute("x", x);
-    el.setAttribute("y", y);
-    el.setAttribute("fill", color);
-    el.setAttribute("font-size", size || "13");
-    el.setAttribute("font-weight", "bold");
-    el.setAttribute("font-family", "monospace");
-    if (anchor) el.setAttribute("text-anchor", anchor);
-    el.textContent = text;
-    el.classList.add("depth-overlay");
-    return el;
-  };
-
-  const mkCircle = (cx, cy, r, color) => {
-    const el = document.createElementNS(SVG_NS, "circle");
-    el.setAttribute("cx", cx);
-    el.setAttribute("cy", cy);
-    el.setAttribute("r", r);
-    el.setAttribute("fill", color);
-    el.classList.add("depth-overlay");
-    return el;
-  };
-
   const toScreen = (heading, pitch) => {
     const dir = headingPitchToDirection(heading, pitch);
     return directionToScreen(dir, pov.heading, pov.pitch, fov, screenWidth, screenHeight);
@@ -1250,128 +1132,6 @@ function renderDepthOverlay(overlay, pov, fov, screenWidth, screenHeight) {
         overlay.appendChild(mkLine(topPt.x, topPt.y, bottomPt.x, bottomPt.y, "rgba(74, 222, 128, 0.4)", "1.5", "4,4"));
       }
     }
-  }
-
-  if (!currentDepthData || currentDepthData.sign_horiz_dist_m == null) return;
-
-  const { sign_heading, road_bearing, alpha_deg } = currentDepthData;
-
-  const bestDet = currentDetections.length > 0
-    ? currentDetections.reduce((a, b) => a.confidence > b.confidence ? a : b)
-    : null;
-
-  const depthScale = getDepthScaleFactor();
-  const signDist = currentDepthData.sign_horiz_dist_m * depthScale;
-  const distSource = depthScale !== 1 ? "depth (scaled)" : "depth";
-  
-  // Perspective-correct base projection: the sign post base is SIGN_POST_HEIGHT_M
-  // directly below the sign center. At distance D, this 3m physical drop maps to
-  // a smaller angular drop (vanishing point effect): atan(3/D) shrinks with distance.
-  const signPitchRad = bestDet ? (bestDet.pitch * Math.PI) / 180 : 0;
-  const groundProjectionPitch =
-    (Math.atan(Math.tan(signPitchRad) - SIGN_POST_HEIGHT_M / signDist) * 180) / Math.PI;
-
-  const displayCurb = currentDepthData.curb_distance_m * depthScale;
-  const displayAlong = currentDepthData.along_road_m * depthScale;
-
-  // Draw road bearing reference line (yellow dashed)
-  const roadHorizonPt = toScreen(road_bearing, 0);
-  const roadGroundPt = toScreen(road_bearing, -30);
-  if (roadHorizonPt && roadGroundPt) {
-    overlay.appendChild(mkLine(roadHorizonPt.x, roadHorizonPt.y, roadGroundPt.x, roadGroundPt.y, "#facc15", "2", "6,4"));
-    const roadLabelPt = toScreen(road_bearing, -5);
-    if (roadLabelPt) {
-      overlay.appendChild(mkText(roadLabelPt.x + 8, roadLabelPt.y, `Road ${Math.round(road_bearing)}°`, "#facc15", "11", "start"));
-    }
-  }
-
-  // Draw sign heading line from sign to ground projection
-  const signDetPt = bestDet ? toScreen(sign_heading, bestDet.pitch) : toScreen(sign_heading, 0);
-  const signGroundPt = toScreen(sign_heading, groundProjectionPitch);
-  if (signDetPt && signGroundPt) {
-    overlay.appendChild(mkLine(signDetPt.x, signDetPt.y, signGroundPt.x, signGroundPt.y, "#22d3ee", "2.5", null));
-  }
-
-  // Draw ground projection point
-  if (signGroundPt) {
-    overlay.appendChild(mkCircle(signGroundPt.x, signGroundPt.y, 6, "#22d3ee"));
-    const label = `${signDist.toFixed(1)}m (${distSource})`;
-    overlay.appendChild(mkText(signGroundPt.x + 10, signGroundPt.y - 2, label, "#22d3ee", "11", "start"));
-  }
-
-  // Draw full 360° dashed orange horizon line.
-  // For curb-side signs: offset horizon downward (positive pitch) by atan((sign_center - camera) / dist)
-  // so the sign doesn't incorrectly appear higher above the horizon when farther away.
-  {
-    let horizonPitchOffset = 0;
-    const deltaH = fitDeltaH();
-    if (deltaH != null && deltaH < 0) {
-      const signCenterAboveCamera = -deltaH;
-      horizonPitchOffset = (Math.atan(signCenterAboveCamera / signDist) * 180) / Math.PI;
-    }
-    let prevPt = null;
-    for (let i = 0; i <= 360; i++) {
-      const heading = i % 360;
-      const weight = Math.max(0, Math.cos(((heading - sign_heading + 180) % 360 - 180) * (Math.PI / 180)));
-      const pitch = horizonPitchOffset * weight * weight;
-      const curPt = toScreen(heading, pitch);
-      if (prevPt && curPt) {
-        overlay.appendChild(mkLine(prevPt.x, prevPt.y, curPt.x, curPt.y, "#fb923c", "1.5", "3,3"));
-      }
-      prevPt = curPt;
-    }
-  }
-
-  // Draw angle arc label between road and sign heading
-  if (Math.abs(alpha_deg) > 5) {
-    const startH = road_bearing;
-    const endH = sign_heading;
-    let deltaHAngle = (endH - startH) % 360;
-    if (deltaHAngle > 180) deltaHAngle -= 360;
-    if (deltaHAngle < -180) deltaHAngle += 360;
-
-    const midH = startH + deltaHAngle / 2;
-    const midPt = toScreen(midH, -5);
-    if (midPt) {
-      overlay.appendChild(mkText(midPt.x, midPt.y, `α=${Math.abs(alpha_deg).toFixed(1)}°`, "#fb923c", "12", "middle"));
-    }
-  }
-
-  // Info box
-  {
-    const hasV2Depth = bestDet && Number.isFinite(bestDet.depth_m);
-    const boxW = 260;
-    const boxH = hasV2Depth ? 118 : 100;
-    const boxX = screenWidth - boxW - 10;
-    const boxY = screenHeight - boxH - 10;
-    const borderColor = "#22d3ee";
-    const bg = document.createElementNS(SVG_NS, "rect");
-    bg.setAttribute("x", boxX);
-    bg.setAttribute("y", boxY);
-    bg.setAttribute("width", boxW);
-    bg.setAttribute("height", boxH);
-    bg.setAttribute("rx", 6);
-    bg.setAttribute("fill", "rgba(0,0,0,0.75)");
-    bg.setAttribute("stroke", borderColor);
-    bg.setAttribute("stroke-width", "1");
-    bg.classList.add("depth-overlay");
-    overlay.appendChild(bg);
-
-    let lineY = boxY + 18;
-    overlay.appendChild(mkText(boxX + 10, lineY, "DEPTH MAP", borderColor, "11", "start"));
-    lineY += 18;
-    const signLabel = currentDepthData._forCalibration ? "calibrated" : "best";
-    overlay.appendChild(mkText(boxX + 10, lineY, `Sign dist: ${signDist.toFixed(1)}m (${signLabel})`, "#94a3b8", "12", "start"));
-
-    if (hasV2Depth) {
-      lineY += 18;
-      overlay.appendChild(mkText(boxX + 10, lineY, `V2 Depth: ${bestDet.depth_m.toFixed(1)}m (DAv2)`, "#0891b2", "12", "start"));
-    }
-
-    lineY += 18;
-    overlay.appendChild(mkText(boxX + 10, lineY, `Curb dist: ${displayCurb.toFixed(1)}m \u22A5 to road`, "#f472b6", "11", "start"));
-    lineY += 18;
-    overlay.appendChild(mkText(boxX + 10, lineY, `Along road: ${displayAlong.toFixed(1)}m`, "#4ade80", "11", "start"));
   }
 }
 
@@ -1464,7 +1224,7 @@ function updateDetectionOverlay() {
     rect.addEventListener("mouseup", (e) => e.stopPropagation());
     overlay.appendChild(rect);
 
-    // Create label
+    // Create label — show calibrated depth if available
     const depthLabel = det.depth_m ? ` | ${det.depth_m.toFixed(1)}m` : "";
     const label = `${det.class_name} ${Math.round(det.confidence * 100)}%${depthLabel}`;
 
@@ -1489,7 +1249,9 @@ function updateDetectionOverlay() {
     overlay.appendChild(text);
 
     // Add title for native hover tooltip
-    rect.innerHTML = `<title>${det.class_name}\nConfidence: ${Math.round(det.confidence * 100)}%\nDepth (DAv2): ${det.depth_m ? det.depth_m.toFixed(2) + "m" : "N/A"}</title>`;
+    const rawStr = det.depth_m_raw != null ? det.depth_m_raw.toFixed(2) + "m" : "N/A";
+    const calStr = det.depth_m != null ? det.depth_m.toFixed(2) + "m" : "N/A";
+    rect.innerHTML = `<title>${det.class_name}\nConfidence: ${Math.round(det.confidence * 100)}%\nDepth raw (DAv2): ${rawStr}\nDepth calibrated: ${calStr}</title>`;
   }
 }
 
@@ -1733,7 +1495,6 @@ function handleMarkerKeyboard(event) {
  */
 function clearDetections() {
   currentDetections = [];
-  currentDepthData = null;
   updateDetectionOverlay();
 
   const statusEl = document.getElementById("detectionStatus");
@@ -1779,6 +1540,7 @@ async function runPanoramaDetection(panoId, heading, pitch, fov, statusEl) {
         api_key: apiKey,
         img_width: 640,
         img_height: 640,
+        sign_panel_height_m: PARKING_SIGN_FACE_HEIGHT_METERS,
       }),
     });
   } catch (err) {
@@ -1917,22 +1679,13 @@ async function runDetectionOnPanorama(
               confidence: det.confidence,
               class_name: det.class_name,
               depth_m: det.depth_m,
+              depth_m_raw: det.depth_m_raw,
             })),
           )
         : result.detections;
 
     detectionPov = { heading: detectHeading, pitch, fov };
-    currentDepthData = null;
     updateDetectionOverlay();
-
-    // Fetch depth measurement for the highest-confidence detection
-    if (currentDetections.length > 0 && typeof currentDetectionContext !== "undefined" && currentDetectionContext) {
-      const bestDet = currentDetections.reduce((a, b) => a.confidence > b.confidence ? a : b);
-      const roadBearing = currentDetectionContext.streetBearing;
-      if (Number.isFinite(bestDet.heading) && Number.isFinite(roadBearing)) {
-        fetchDepthForDetection(bestDet, roadBearing);
-      }
-    }
 
     const count = currentDetections.length;
     const timeMs = result.total_inference_time_ms;
@@ -3509,6 +3262,7 @@ function estimateAllSignLocations(cameraLat, cameraLng, options = null) {
         distanceAngularHeight: resolveDetectionDistanceAngularHeight(det),
         pitch: det.pitch,
         depth_m: det.depth_m,
+        depth_m_raw: det.depth_m_raw,
         sourceDetections: det.sourceDetections || 1,
         mergeStackFactor: det.mergeStackFactor || 0,
       };
