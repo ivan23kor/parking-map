@@ -1489,6 +1489,15 @@
         // Initialize layers
         signMarkersLayer = L.layerGroup().addTo(map);
         panoramaCaptureSpotsLayer = L.layerGroup().addTo(map);
+        debugMapLayer = L.layerGroup().addTo(map);
+
+        // Debug overlay keyboard shortcut (Shift+D)
+        document.addEventListener("keydown", (e) => {
+          if (e.shiftKey && e.key === "D") {
+            e.preventDefault();
+            toggleDebugOverlays();
+          }
+        });
 
         // Set up event handlers
         setupEventHandlers();
@@ -1850,6 +1859,12 @@
           signs: signLocations,
         };
 
+        // ── Debug overlays ──
+        if (debugOverlaysEnabled) {
+          updateDebugMapOverlays();
+          renderDebugDecompositionLines(signLocations, cameraLat, cameraLng);
+        }
+
         // ── Calibration instrumentation ──
         if (!window._calibrationLog) {
           window._calibrationLog = [];
@@ -1867,6 +1882,9 @@
             angularHeight: det.angularHeight,
             distanceAngularHeight: s.distanceAngularHeight,
             depthAnythingMeters: s.depthAnythingMeters,
+            depthAnythingMetersRaw: s.depthAnythingMetersRaw,
+            alongStreetDistance: s.alongStreetDistance,
+            trafficBearing: s.trafficBearing,
             sourceDetections: s.sourceDetections,
             mergeStackFactor: s.mergeStackFactor,
             estimatedDistance: s.distance,
@@ -1887,7 +1905,9 @@
             angH: e.angularHeight?.toFixed(3),
             distAngH: e.distanceAngularHeight?.toFixed(3),
             depthAny: e.depthAnythingMeters?.toFixed(1) ?? "n/a",
+            depthRaw: e.depthAnythingMetersRaw?.toFixed(1) ?? "n/a",
             estDist: e.estimatedDistance?.toFixed(2),
+            along: e.alongStreetDistance?.toFixed(1) ?? "n/a",
             method: e.method,
           })),
         );
@@ -2119,6 +2139,7 @@
         const cols = [
           "ts", "panoId", "cameraLat", "cameraLng", "signIdx", "heading", "pitch",
           "angularHeight", "distanceAngularHeight", "sourceDetections", "mergeStackFactor",
+          "depthAnythingMeters", "depthAnythingMetersRaw", "alongStreetDistance", "trafficBearing",
           "estimatedDistance", "method", "signLat", "signLng",
           "groundTruthLat", "groundTruthLng", "groundTruthDistance", "groundTruthMethod",
           "gtPanoLat", "gtPanoLng", "gtPanoDistance",

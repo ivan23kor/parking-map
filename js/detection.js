@@ -15,6 +15,10 @@ const documentEventListeners = [];
 const panoramaLinkSpotPositionCache = new Map();
 const panoramaLinkSpotRequestsInFlight = new Set();
 
+// Debug overlay state (toggle with Shift+D)
+let debugOverlaysEnabled = false;
+let debugMapLayer = null; // Leaflet layer group for debug overlays on 2D map
+
 // Calibration state
 let calibrationMode = false;
 let calibrationData = []; // Reference points: {pano_id, sign_heading, sign_pitch, base_heading, base_pitch, depth_at_base, horiz_dist, timestamp}
@@ -356,6 +360,7 @@ function mergeAngularDetections(detections) {
     confidence,
     class_name: className,
     depthAnythingMeters: detections[0].depthAnythingMeters,
+    depthAnythingMetersRaw: detections[0].depthAnythingMetersRaw,
     sourceDetections: normalizedDetections.reduce(
       (sum, det) => sum + (det.sourceDetections || 1),
       0,
@@ -1122,6 +1127,9 @@ function renderDepthOverlay(overlay, pov, fov, screenWidth, screenHeight) {
     return directionToScreen(dir, pov.heading, pov.pitch, fov, screenWidth, screenHeight);
   };
 
+  // Debug distance rings
+  renderDebugDistanceRings(overlay, pov, fov, screenWidth, screenHeight);
+
   // In calibration mode: draw vertical guide lines from each detection down
   if (calibrationMode) {
     for (const det of currentDetections) {
@@ -1680,6 +1688,7 @@ async function runDetectionOnPanorama(
               confidence: det.confidence,
               class_name: det.class_name,
               depthAnythingMeters: det.depth_anything_meters,
+              depthAnythingMetersRaw: det.depth_anything_meters_raw,
             })),
           )
         : result.detections;
@@ -2748,11 +2757,24 @@ function projectSignToCurbLine(
   const headingDelta = signedAngleDeltaDegrees(signHeading, trafficBearing);
   const headingDeltaRad = (headingDelta * Math.PI) / 180;
   const rawAlongStreetDistance = distanceMeters * Math.cos(headingDeltaRad);
+  const crossStreetDistance = distanceMeters * Math.sin(headingDeltaRad);
   const alongStreetDistance = clamp(
     rawAlongStreetDistance,
     -distanceMeters,
     distanceMeters,
   );
+
+  if (debugOverlaysEnabled) {
+    console.log(
+      `[projectSignToCurbLine] heading=${signHeading.toFixed(1)}° ` +
+        `trafficBearing=${trafficBearing.toFixed(1)}° ` +
+        `headingDelta=${headingDelta.toFixed(1)}° ` +
+        `dist=${distanceMeters.toFixed(1)}m → ` +
+        `along=${alongStreetDistance.toFixed(1)}m cross=${crossStreetDistance.toFixed(1)}m ` +
+        `(cos=${Math.cos(headingDeltaRad).toFixed(3)}) ` +
+        `side=${resolvedSide} edgeOffset=${edgeOffsetMeters.toFixed(1)}m`,
+    );
+  }
 
   if (hasWayGeometry(wayGeometry)) {
     const anchor =
@@ -2794,6 +2816,15 @@ function projectSignToCurbLine(
           lateralBearing,
         );
 
+        if (debugOverlaysEnabled) {
+          console.log(
+            `  [wayGeometry] anchor=(${anchor.lat.toFixed(6)},${anchor.lng.toFixed(6)}) seg=${anchor.segmentIndex} ` +
+              `anchorBearing=${anchorBearing.toFixed(1)}° walkSign=${walkDirectionSign} ` +
+              `roadPt=(${roadPoint.lat.toFixed(6)},${roadPoint.lng.toFixed(6)}) ` +
+              `lateralBearing=${lateralBearing.toFixed(1)}° → snapped=(${snapped.lat.toFixed(6)},${snapped.lng.toFixed(6)})`,
+          );
+        }
+
         return {
           lat: snapped.lat,
           lng: snapped.lng,
@@ -2802,6 +2833,10 @@ function projectSignToCurbLine(
           curbOffsetMeters: edgeOffsetMeters,
           trafficBearing: localTrafficBearing,
           side: resolvedSide,
+          _debug: debugOverlaysEnabled ? {
+            anchorLat: anchor.lat, anchorLng: anchor.lng,
+            roadPointLat: roadPoint.lat, roadPointLng: roadPoint.lng,
+          } : undefined,
         };
       }
     }
@@ -3234,10 +3269,12 @@ function estimateSignLocation(
     method = "size";
   }
 
+  const rawDepth = detection.depthAnythingMetersRaw;
   console.log(
     `[estimateSignLocation] heading=${detection.heading.toFixed(1)}° ` +
       `method=${method} dist=${distance.toFixed(1)}m ` +
       `(depthAnything=${depthAnythingDistance?.toFixed(1) ?? "n/a"}, ` +
+      `depthRaw=${rawDepth?.toFixed(1) ?? "n/a"}, ` +
       `pitch=${pitchDistance?.toFixed(1) ?? "n/a"}, ` +
       `size=${sizeDistance.toFixed(1)})`,
   );
@@ -3286,6 +3323,7 @@ function estimateAllSignLocations(cameraLat, cameraLng, options = null) {
         distanceAngularHeight: resolveDetectionDistanceAngularHeight(det),
         pitch: det.pitch,
         depthAnythingMeters: det.depthAnythingMeters,
+        depthAnythingMetersRaw: det.depthAnythingMetersRaw,
         sourceDetections: det.sourceDetections || 1,
         mergeStackFactor: det.mergeStackFactor || 0,
       };
@@ -3303,11 +3341,157 @@ function estimateAllSignLocations(cameraLat, cameraLng, options = null) {
         trafficBearing: curbAligned.trafficBearing,
         side: curbAligned.side,
         method: `${estimate.method}+curb`,
+        _debug: curbAligned._debug,
       };
     })
     .filter((loc) => loc !== null);
 
   return results;
+}
+
+// ── Debug overlay rendering ──
+
+const DEBUG_RING_DISTANCES = [10, 20, 30, 40, 50];
+const DEBUG_RING_COLORS = ["#ff6b6b", "#ffa94d", "#ffd43b", "#69db7c", "#74c0fc"];
+const DEBUG_RING_AZIMUTH_STEP = 5;
+
+function toggleDebugOverlays() {
+  debugOverlaysEnabled = !debugOverlaysEnabled;
+  console.log(`[Debug] Overlays ${debugOverlaysEnabled ? "ENABLED" : "DISABLED"}`);
+  updateDetectionOverlay();
+  if (typeof updateDebugMapOverlays === "function") {
+    updateDebugMapOverlays();
+  }
+}
+
+function renderDebugDistanceRings(overlay, pov, fov, screenWidth, screenHeight) {
+  if (!debugOverlaysEnabled || !detectionPanorama) return;
+
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const cameraPosition = detectionPanorama.getPosition?.();
+  const cameraLat = cameraPosition?.lat?.();
+  const cameraLng = cameraPosition?.lng?.();
+  if (!Number.isFinite(cameraLat) || !Number.isFinite(cameraLng)) return;
+
+  for (let ri = 0; ri < DEBUG_RING_DISTANCES.length; ri++) {
+    const dist = DEBUG_RING_DISTANCES[ri];
+    const color = DEBUG_RING_COLORS[ri];
+    let prevScreen = null;
+    let labelPlaced = false;
+
+    for (let az = 0; az <= 360; az += DEBUG_RING_AZIMUTH_STEP) {
+      const worldPt = projectLatLng(cameraLat, cameraLng, dist, az);
+      const screen = projectWorldPointToScreen(
+        worldPt.lat, worldPt.lng, 0,
+        cameraLat, cameraLng,
+        pov.heading, pov.pitch, fov,
+        screenWidth, screenHeight,
+      );
+
+      if (screen && prevScreen) {
+        const line = document.createElementNS(SVG_NS, "line");
+        line.setAttribute("x1", prevScreen.x);
+        line.setAttribute("y1", prevScreen.y);
+        line.setAttribute("x2", screen.x);
+        line.setAttribute("y2", screen.y);
+        line.setAttribute("stroke", color);
+        line.setAttribute("stroke-width", "1.5");
+        line.setAttribute("stroke-opacity", "0.7");
+        line.setAttribute("stroke-dasharray", "4,3");
+        line.classList.add("debug-overlay");
+        overlay.appendChild(line);
+      }
+
+      if (screen && !labelPlaced &&
+          screen.x > 20 && screen.x < screenWidth - 40 &&
+          screen.y > 10 && screen.y < screenHeight - 10) {
+        const text = document.createElementNS(SVG_NS, "text");
+        text.setAttribute("x", screen.x);
+        text.setAttribute("y", screen.y - 4);
+        text.setAttribute("fill", color);
+        text.setAttribute("font-size", "11");
+        text.setAttribute("font-weight", "bold");
+        text.setAttribute("text-shadow", "0 0 3px black");
+        text.classList.add("debug-overlay");
+        text.textContent = `${dist}m`;
+        overlay.appendChild(text);
+        labelPlaced = true;
+      }
+
+      prevScreen = screen;
+    }
+  }
+}
+
+function updateDebugMapOverlays() {
+  if (!debugMapLayer) return;
+  debugMapLayer.clearLayers();
+  if (!debugOverlaysEnabled) return;
+
+  const cameraPosition = detectionPanorama?.getPosition?.();
+  const cameraLat = cameraPosition?.lat?.();
+  const cameraLng = cameraPosition?.lng?.();
+  if (!Number.isFinite(cameraLat) || !Number.isFinite(cameraLng)) return;
+
+  // Distance rings on map
+  for (let ri = 0; ri < DEBUG_RING_DISTANCES.length; ri++) {
+    const dist = DEBUG_RING_DISTANCES[ri];
+    const color = DEBUG_RING_COLORS[ri];
+    L.circle([cameraLat, cameraLng], {
+      radius: dist,
+      color,
+      weight: 1.5,
+      opacity: 0.6,
+      fill: false,
+      dashArray: "4,3",
+      interactive: false,
+    }).addTo(debugMapLayer);
+
+    // Label at east side of ring
+    const labelPt = projectLatLng(cameraLat, cameraLng, dist, 90);
+    L.marker([labelPt.lat, labelPt.lng], {
+      icon: L.divIcon({
+        className: "debug-ring-label",
+        html: `<span style="color:${color};font-size:11px;font-weight:bold;text-shadow:0 0 3px #000">${dist}m</span>`,
+        iconSize: [30, 14],
+        iconAnchor: [0, 7],
+      }),
+      interactive: false,
+    }).addTo(debugMapLayer);
+  }
+}
+
+function renderDebugDecompositionLines(signLocations, cameraLat, cameraLng) {
+  if (!debugOverlaysEnabled || !debugMapLayer) return;
+
+  for (const sign of signLocations) {
+    if (!sign._debug) continue;
+    const { anchorLat, anchorLng, roadPointLat, roadPointLng } = sign._debug;
+
+    // Camera -> anchor (orange dashed)
+    L.polyline(
+      [[cameraLat, cameraLng], [anchorLat, anchorLng]],
+      { color: "#ffa94d", weight: 2, dashArray: "3,3", opacity: 0.7, interactive: false },
+    ).addTo(debugMapLayer);
+
+    // Anchor -> road walk point (cyan)
+    L.polyline(
+      [[anchorLat, anchorLng], [roadPointLat, roadPointLng]],
+      { color: "#22d3ee", weight: 2, opacity: 0.8, interactive: false },
+    ).addTo(debugMapLayer);
+
+    // Road walk point -> final sign position (magenta)
+    L.polyline(
+      [[roadPointLat, roadPointLng], [sign.lat, sign.lng]],
+      { color: "#e879f9", weight: 2, opacity: 0.8, interactive: false },
+    ).addTo(debugMapLayer);
+
+    // Direct line from camera to sign (white dotted, for comparison)
+    L.polyline(
+      [[cameraLat, cameraLng], [sign.lat, sign.lng]],
+      { color: "#ffffff", weight: 1, dashArray: "2,4", opacity: 0.4, interactive: false },
+    ).addTo(debugMapLayer);
+  }
 }
 
 /**
