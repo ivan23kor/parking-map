@@ -217,6 +217,23 @@ function mergeAngularDetections(detections) {
     mergedAngularHeight * (1 - mergeStackFactor) +
     representativeHeight * mergeStackFactor;
 
+  // Normalize sign count by height ratio: physical_height / standard_height (0.45m)
+  // When depth is available, compute physical height from angular height + distance.
+  // When depth is unavailable, count each detection as 1 (no normalization possible).
+  const normalizedSignCount = normalizedDetections.reduce((sum, det) => {
+    if (det.depthAnythingMeters > 0 && det.angularHeight > 0) {
+      const angularHeightRad = (det.angularHeight * Math.PI) / 180;
+      const physicalHeightMeters = det.depthAnythingMeters * Math.tan(angularHeightRad);
+      const heightNormalizationFactor = physicalHeightMeters / PARKING_SIGN_FACE_HEIGHT_METERS;
+      // Discard sub-11cm detections (< 0.25 normalized) as likely false positives
+      if (heightNormalizationFactor < 0.25) {
+        return sum;
+      }
+      return sum + heightNormalizationFactor;
+    }
+    return sum + (det.sourceDetections || 1);
+  }, 0);
+
   return normalizeAngularDetection({
     heading,
     pitch,
@@ -226,10 +243,7 @@ function mergeAngularDetections(detections) {
     class_name: className,
     depthAnythingMeters: detections[0].depthAnythingMeters,
     depthAnythingMetersRaw: detections[0].depthAnythingMetersRaw,
-    sourceDetections: normalizedDetections.reduce(
-      (sum, det) => sum + (det.sourceDetections || 1),
-      0,
-    ),
+    sourceDetections: normalizedSignCount,
     sourceMedianAngularHeight: representativeHeight,
     sourceMedianAngularWidth: representativeWidth,
     distanceAngularHeight,
@@ -928,7 +942,8 @@ function updateDetectionOverlay() {
     if (signCount > 1) {
       const msf = det.mergeStackFactor || 0;
       const arrangement = msf > 0.5 ? "stacked" : msf < 0.2 ? "side-by-side" : "cluster";
-      layoutLabel = ` | ${signCount}x ${arrangement}`;
+      const displayCount = signCount.toFixed(1);
+      layoutLabel = ` | ${displayCount}x ${arrangement}`;
     }
     const label = `${det.class_name} ${Math.round(det.confidence * 100)}%${depthLabel}${layoutLabel}`;
 
