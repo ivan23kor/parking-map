@@ -345,17 +345,12 @@ test.describe("detection flow", () => {
         sourceDetections: merged.sourceDetections,
         mergedHeight: merged.angularHeight,
         distanceHeight: resolveDetectionDistanceAngularHeight(merged),
-        naiveDistance: estimateDistanceFromAngularSize(merged.angularHeight),
-        adjustedDistance: estimateDistanceFromAngularSize(
-          resolveDetectionDistanceAngularHeight(merged),
-        ),
         mergeStackFactor: merged.mergeStackFactor,
       };
     });
 
     expect(metrics.sourceDetections).toBe(2);
     expect(metrics.distanceHeight).toBeLessThan(metrics.mergedHeight);
-    expect(metrics.adjustedDistance).toBeGreaterThan(metrics.naiveDistance);
     expect(metrics.mergeStackFactor).toBeGreaterThan(0.35);
   });
 

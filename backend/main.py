@@ -862,12 +862,12 @@ async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
 
         # Run depth estimation once per slice (only if detections found)
         slice_has_dets = any(r.boxes is not None and len(r.boxes) > 0 for r in yolo_results)
-        depth_map = None
+        depth_tensor = None
         if slice_has_dets:
             try:
                 depth_start = time.time()
                 depth_result = depth_model(image)
-                depth_map = depth_result["depth"]  # PIL Image with metric depth
+                depth_tensor = depth_result["predicted_depth"]  # torch tensor with metric depth
                 total_inference_ms += (time.time() - depth_start) * 1000
             except Exception as e:
                 print(f"Panorama detect: depth estimation failed for slice {slice_heading:.1f}°: {e}")
@@ -887,9 +887,9 @@ async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
                 # Sample depth at bbox center
                 det_depth_m_raw = None
                 det_depth_m = None
-                if depth_map is not None:
+                if depth_tensor is not None:
                     try:
-                        depth_arr = np.array(depth_map)
+                        depth_arr = depth_tensor.cpu().numpy() if torch.is_tensor(depth_tensor) else np.array(depth_tensor)
                         px_x = int(min(max(cx, 0), depth_arr.shape[1] - 1))
                         px_y = int(min(max(cy, 0), depth_arr.shape[0] - 1))
                         det_depth_m_raw = float(depth_arr[px_y, px_x])
@@ -923,9 +923,13 @@ async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
                 # Calibrate depth using sign panel height reference
                 if det_depth_m_raw is not None and ang_h > 0:
                     ang_h_rad = math.radians(ang_h)
-                    apparent_height_m = 2 * det_depth_m_raw * math.tan(ang_h_rad / 2)
-                    if apparent_height_m > 0:
-                        det_depth_m = det_depth_m_raw * (request.sign_panel_height_m / apparent_height_m)
+                    inferred_sign_height = 2 * det_depth_m_raw * math.tan(ang_h_rad / 2)
+                    if inferred_sign_height > 0:
+                        # Calibrate raw depth using 0.45m reference sign height
+                        det_depth_m = det_depth_m_raw * (0.45 / inferred_sign_height)
+                        # Convert camera-relative depth (Z along ray) to horizontal along-road distance
+                        pitch_rad = math.radians(center_pitch)
+                        det_depth_m = det_depth_m * math.cos(pitch_rad)
 
                 all_angular_dets.append(AngularDetection(
                     heading=center_heading,
