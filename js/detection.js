@@ -936,7 +936,9 @@ function updateDetectionOverlay() {
     overlay.appendChild(rect);
 
     // Create label — show depth, sign count, and layout
-    const depthLabel = det.depthAnythingMeters ? ` | ${det.depthAnythingMeters.toFixed(1)}m` : "";
+    const depthLabel = det.depthAnythingMeters
+      ? ` | ${det.depthAnythingMeters.toFixed(1)}m (raw: ${det.depthAnythingMetersRaw?.toFixed(1) || "n/a"}m)`
+      : "";
     const signCount = det.sourceDetections || 1;
     let layoutLabel = "";
     if (signCount > 1) {
