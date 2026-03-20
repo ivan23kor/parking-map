@@ -49,6 +49,16 @@ const PANORAMA_LINK_SPOT_HEIGHT_METERS = 0;
 const PANORAMA_LINK_SPOT_RADIUS_PX = 12;
 const PANORAMA_LINK_SPOT_MAX_VISIBLE = 8;
 
+// Sign panel aspect ratio and height calibration constants
+// Reference sign from screenshot: 182px height / 111px width = 1.64
+const SIGN_PANEL_ASPECT_RATIO = 182 / 111;  // ≈ 1.64
+const SIGN_PANEL_HEIGHT_CM = 45;            // Single panel height in cm
+const ASPECT_RATIO_TOLERANCE = 0.15;        // Tolerance band for aspect ratio classification
+// Thresholds for stacking factor (observedAspectRatio / SIGN_PANEL_ASPECT_RATIO)
+const ASPECT_RATIO_2_STACKED_THRESHOLD = 2.5;   // 2 panels vertically stacked
+const ASPECT_RATIO_3_STACKED_THRESHOLD = 3.5;   // 3 panels vertically stacked
+const ASPECT_RATIO_HORIZONTAL_THRESHOLD = 1.5;  // 2 panels side-by-side vs single
+
 /**
  * Convert heading/pitch to pixel coordinates in the full panorama tile image.
  *
@@ -152,6 +162,57 @@ function getTilesForRegion(
   return { tiles, tileX1, tileY1, cropBounds };
 }
 
+/**
+ * Infer parking sign cluster configuration from bounding box aspect ratio.
+ * Uses aspect ratio signature to distinguish single panel, stacked, or side-by-side arrangements.
+ *
+ * Returns { referenceHeightCm, panelLayout }
+ * where referenceHeightCm is the inferred physical height of the sign cluster (used for depth calibration)
+ * and panelLayout describes the configuration (single, 2_stacked, 3_stacked, 2_horizontal, etc)
+ */
+function inferSignClusterHeight(angularHeight, angularWidth, sourceDetectionsCount = 1) {
+  // Guard against zero or negative width
+  if (angularWidth <= 0) {
+    return { referenceHeightCm: 45, panelLayout: "unknown" };
+  }
+
+  const observedAspectRatio = angularHeight / angularWidth;
+
+  // Check if aspect ratio matches single panel (or 2×2 grid)
+  if (Math.abs(observedAspectRatio - SIGN_PANEL_ASPECT_RATIO) < ASPECT_RATIO_TOLERANCE) {
+    // Both single panel and 2×2 grid have similar H:W ≈ 1.64
+    // Use source detections count to disambiguate
+    if (sourceDetectionsCount >= 3) {
+      return { referenceHeightCm: 90, panelLayout: "2x2_grid" };
+    }
+    return { referenceHeightCm: 45, panelLayout: "single" };
+  }
+
+  // Check for vertically stacked (H:W >> 1.64)
+  if (observedAspectRatio > SIGN_PANEL_ASPECT_RATIO) {
+    const stackFactor = observedAspectRatio / SIGN_PANEL_ASPECT_RATIO;
+
+    if (stackFactor < ASPECT_RATIO_2_STACKED_THRESHOLD) {
+      return { referenceHeightCm: 90, panelLayout: "2_stacked" };
+    } else if (stackFactor < ASPECT_RATIO_3_STACKED_THRESHOLD) {
+      return { referenceHeightCm: 135, panelLayout: "3_stacked" };
+    } else {
+      // Clamp to max reasonable stack
+      return { referenceHeightCm: 135, panelLayout: "3_stacked+" };
+    }
+  }
+
+  // Check for horizontally side-by-side (H:W << 1.64)
+  if (observedAspectRatio < SIGN_PANEL_ASPECT_RATIO / ASPECT_RATIO_HORIZONTAL_THRESHOLD) {
+    // When 2 panels are side-by-side, aspect ratio approaches 0.82 (half)
+    // Use heading spread vs pitch spread to confirm horizontal arrangement
+    return { referenceHeightCm: 45, panelLayout: "2_horizontal" };
+  }
+
+  // Ambiguous or unknown configuration
+  return { referenceHeightCm: 45, panelLayout: "unknown" };
+}
+
 function mergeAngularDetections(detections) {
   if (!Array.isArray(detections) || detections.length === 0) {
     return [];
@@ -192,15 +253,38 @@ function mergeAngularDetections(detections) {
       confidence = det.confidence;
       className = det.class_name;
     }
-    // Collect valid depths for aggregation
-    if (Number.isFinite(det.depthAnythingMeters) && det.depthAnythingMeters > 0) {
-      detectionDepths.push(det.depthAnythingMeters);
+    // Collect valid depths for aggregation (prefer calibrated, fallback to raw)
+    const depthToUse = (Number.isFinite(det.depthCalibrated) && det.depthCalibrated > 0)
+      ? det.depthCalibrated
+      : det.depthAnythingMeters;
+    if (Number.isFinite(depthToUse) && depthToUse > 0) {
+      detectionDepths.push(depthToUse);
+      // Log per-detection calibration info
+      console.log("Detection calibration:", {
+        rawDepth: det.depthAnythingMetersRaw,
+        calibratedDepth: det.depthCalibrated,
+        pixelSize: det.pixelSize,
+        sizeCorrection: det.sizeCorrection,
+        panelLayout: det.inferredPanelLayout,
+        referenceHeightCm: det.referenceHeightCm,
+      });
     }
   }
 
   // Also collect depth from the first detection (loop starts at i=1)
-  if (Number.isFinite(detections[0].depthAnythingMeters) && detections[0].depthAnythingMeters > 0) {
-    detectionDepths.push(detections[0].depthAnythingMeters);
+  const firstDepthToUse = (Number.isFinite(detections[0].depthCalibrated) && detections[0].depthCalibrated > 0)
+    ? detections[0].depthCalibrated
+    : detections[0].depthAnythingMeters;
+  if (Number.isFinite(firstDepthToUse) && firstDepthToUse > 0) {
+    detectionDepths.push(firstDepthToUse);
+    console.log("Detection calibration (first):", {
+      rawDepth: detections[0].depthAnythingMetersRaw,
+      calibratedDepth: detections[0].depthCalibrated,
+      pixelSize: detections[0].pixelSize,
+      sizeCorrection: detections[0].sizeCorrection,
+      panelLayout: detections[0].inferredPanelLayout,
+      referenceHeightCm: detections[0].referenceHeightCm,
+    });
   }
 
   // Aggregate depth: use median of cluster members instead of detection[0] only
@@ -962,19 +1046,11 @@ function updateDetectionOverlay() {
     rect.addEventListener("mouseup", (e) => e.stopPropagation());
     overlay.appendChild(rect);
 
-    // Create label — show depth, sign count, and layout
+    // Create label — show depth
     const depthLabel = det.depthAnythingMeters
-      ? ` | ${det.depthAnythingMeters.toFixed(1)}m (raw: ${det.depthAnythingMetersRaw?.toFixed(1) || "n/a"}m)`
+      ? ` | ${det.depthAnythingMeters.toFixed(1)}m`
       : "";
-    const signCount = det.sourceDetections || 1;
-    let layoutLabel = "";
-    if (signCount > 1) {
-      const msf = det.mergeStackFactor || 0;
-      const arrangement = msf > 0.5 ? "stacked" : msf < 0.2 ? "side-by-side" : "cluster";
-      const displayCount = signCount.toFixed(1);
-      layoutLabel = ` | ${displayCount}x ${arrangement}`;
-    }
-    const label = `${det.class_name} ${Math.round(det.confidence * 100)}%${depthLabel}${layoutLabel}`;
+    const label = `${det.class_name} ${Math.round(det.confidence * 100)}%${depthLabel}`;
 
     const labelBg = document.createElementNS(
       "http://www.w3.org/2000/svg",
@@ -1419,6 +1495,11 @@ async function runDetectionOnPanorama(
               class_name: det.class_name,
               depthAnythingMeters: det.depth_anything_meters,
               depthAnythingMetersRaw: det.depth_anything_meters_raw,
+              depthCalibrated: det.depth_calibrated,
+              inferredPanelLayout: det.inferred_panel_layout,
+              referenceHeightCm: det.reference_height_cm,
+              pixelSize: det.pixel_size,
+              sizeCorrection: det.size_correction,
             })),
           )
         : result.detections;
