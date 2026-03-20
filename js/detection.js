@@ -345,6 +345,13 @@ function mergeAngularDetections(detections) {
     return sum + (det.sourceDetections || 1);
   }, 0);
 
+  // Re-infer referenceHeightCm from merged angular dimensions
+  const { referenceHeightCm } = inferSignClusterHeight(
+    mergedAngularHeight,
+    mergedAngularWidth,
+    normalizedDetections.length,
+  );
+
   return normalizeAngularDetection({
     heading,
     pitch,
@@ -360,6 +367,7 @@ function mergeAngularDetections(detections) {
     distanceAngularHeight,
     distanceAngularWidth: representativeWidth,
     mergeStackFactor,
+    referenceHeightCm,
   });
 }
 
