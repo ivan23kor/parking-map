@@ -62,6 +62,96 @@ app.add_middleware(
 )
 
 
+# Sign panel inference constants (must match frontend constants in js/detection.js)
+SIGN_PANEL_ASPECT_RATIO = 182.0 / 111.0  # ≈ 1.64
+SIGN_PANEL_HEIGHT_CM = 45
+ASPECT_RATIO_TOLERANCE = 0.15
+ASPECT_RATIO_2_STACKED_THRESHOLD = 2.5
+ASPECT_RATIO_3_STACKED_THRESHOLD = 3.5
+ASPECT_RATIO_HORIZONTAL_THRESHOLD = 1.5
+
+
+def infer_sign_cluster_height(angular_height: float, angular_width: float, source_detections_count: int = 1) -> tuple[int, str]:
+    """
+    Infer parking sign cluster configuration from bounding box aspect ratio.
+    Returns (reference_height_cm, panel_layout) tuple.
+    """
+    if angular_width <= 0:
+        return 45, "unknown"
+
+    observed_aspect_ratio = angular_height / angular_width
+
+    # Single panel or 2×2 grid
+    if abs(observed_aspect_ratio - SIGN_PANEL_ASPECT_RATIO) < ASPECT_RATIO_TOLERANCE:
+        if source_detections_count >= 3:
+            return 90, "2x2_grid"
+        return 45, "single"
+
+    # Vertically stacked (H:W >> 1.64)
+    if observed_aspect_ratio > SIGN_PANEL_ASPECT_RATIO:
+        stack_factor = observed_aspect_ratio / SIGN_PANEL_ASPECT_RATIO
+
+        if stack_factor < ASPECT_RATIO_2_STACKED_THRESHOLD:
+            return 90, "2_stacked"
+        elif stack_factor < ASPECT_RATIO_3_STACKED_THRESHOLD:
+            return 135, "3_stacked"
+        else:
+            return 135, "3_stacked+"
+
+    # Horizontally side-by-side (H:W << 1.64)
+    if observed_aspect_ratio < SIGN_PANEL_ASPECT_RATIO / ASPECT_RATIO_HORIZONTAL_THRESHOLD:
+        return 45, "2_horizontal"
+
+    return 45, "unknown"
+
+
+def fit_per_detection_affine(
+    ref1_d_pred: float,
+    ref1_d_real: float,
+    ref1_size_px: float,
+    ref2_d_pred: float,
+    ref2_d_real: float,
+    ref2_size_px: float,
+) -> tuple[float, float, float, float]:
+    """
+    Fit affine transform coefficients from two calibration references.
+
+    For depth: d_real = s_d * d_pred + t_d
+    For size: size_real = s_s * size_pred + t_s
+
+    Args:
+        ref1_d_pred: Predicted depth at reference 1 (meters)
+        ref1_d_real: Ground truth depth at reference 1 (meters)
+        ref1_size_px: Bounding box size at reference 1 (pixels)
+        ref2_d_pred: Predicted depth at reference 2 (meters)
+        ref2_d_real: Ground truth depth at reference 2 (meters)
+        ref2_size_px: Bounding box size at reference 2 (pixels)
+
+    Returns:
+        (s_d, t_d, s_s, t_s_factor) tuple
+        where:
+        - s_d: Scale factor for depth
+        - t_d: Shift factor for depth (meters)
+        - s_s: Scale factor for size
+        - t_s_factor: Effective shift per unit pixel size
+    """
+    if ref1_d_pred == ref2_d_pred:
+        # Can't fit affine with identical predictions
+        return 1.0, 0.0, 1.0, 0.0
+
+    # Fit depth affine: [d_pred_1, 1; d_pred_2, 1] @ [s_d, t_d]^T = [d_real_1, d_real_2]^T
+    # Using least squares: d_real = s_d * d_pred + t_d
+    denom = ref2_d_pred - ref1_d_pred
+    s_d = (ref2_d_real - ref1_d_real) / denom
+    t_d = ref1_d_real - s_d * ref1_d_pred
+
+    # Fit size affine (same slope as depth, but different intercept)
+    s_s = s_d  # Same scale factor for size as for depth
+    t_s_factor = (ref1_d_real - s_s * ref1_d_pred)  # Effective shift per unit pixel size
+
+    return s_d, t_d, s_s, t_s_factor
+
+
 class DetectionRequest(BaseModel):
     image_url: Optional[str] = None
     confidence: float = 0.15
@@ -146,6 +236,12 @@ class AngularDetection(BaseModel):
     class_name: str
     depth_anything_meters: Optional[float] = None
     depth_anything_meters_raw: Optional[float] = None
+    # Depth calibration fields (Phase 1: Height inference)
+    inferred_panel_layout: Optional[str] = None
+    reference_height_cm: Optional[int] = None
+    depth_calibrated: Optional[float] = None
+    pixel_size: Optional[int] = None
+    size_correction: Optional[float] = None
 
 
 class SahiRequest(BaseModel):
@@ -802,31 +898,33 @@ async def detect_file(file: UploadFile = File(...), confidence: float = 0.15):
 
 async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
     """
-    Panorama detection using overlapping higher-zoom windows.
+    Panorama detection using two overlapping higher-zoom windows (2-image SAHL).
 
-    Slices the panorama view into overlapping higher-zoom windows,
+    Slices the panorama view into exactly 2 overlapping windows,
     runs YOLO on each, converts detections to angular coordinates,
     and merges with NMS.
     """
-    # Calculate slice headings to cover the requested FOV
-    step = request.slice_fov * (1 - request.overlap)
-    num_slices = max(1, math.ceil(request.fov / step))
-    # Center the slices around the requested heading
-    total_span = (num_slices - 1) * step if num_slices > 1 else 0
-    start_heading = request.heading - total_span / 2
+    # Two-image SAHL: calculate required slice FOV to cover requested FOV with overlap
+    num_slices = 2
+    slice_fov = request.fov / (2 - request.overlap)
+
+    # Calculate slice headings (centered around requested heading)
+    # Each slice is offset by half of (slice_fov - overlap_region)
+    step = slice_fov * (1 - request.overlap)
+    start_heading = request.heading - step / 2
 
     slices = []
     for i in range(num_slices):
         slice_heading = (start_heading + i * step) % 360
         slices.append(slice_heading)
 
-    print(f"Panorama detect: {num_slices} slices, FOV={request.slice_fov}°, "
+    print(f"Panorama detect: {num_slices} slices, FOV={slice_fov:.1f}°, "
           f"step={step:.1f}°, headings={[f'{h:.1f}' for h in slices]}")
 
     # Fetch all slice images in parallel
     async def fetch_slice(client: httpx.AsyncClient, heading: float) -> tuple[float, bytes | None]:
         url = build_streetview_url(
-            request.pano_id, heading, request.pitch, request.slice_fov,
+            request.pano_id, heading, request.pitch, slice_fov,
             request.img_width, request.img_height, request.api_key
         )
         try:
@@ -899,14 +997,14 @@ async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
                 # Convert center to angular coords
                 center_heading, center_pitch = pixel_to_angular(
                     cx, cy, slice_heading, request.pitch,
-                    request.slice_fov, img_w, img_h
+                    slice_fov, img_w, img_h
                 )
 
                 # Convert corners to get angular dimensions
-                tl_h, tl_p = pixel_to_angular(x1, y1, slice_heading, request.pitch, request.slice_fov, img_w, img_h)
-                tr_h, tr_p = pixel_to_angular(x2, y1, slice_heading, request.pitch, request.slice_fov, img_w, img_h)
-                bl_h, bl_p = pixel_to_angular(x1, y2, slice_heading, request.pitch, request.slice_fov, img_w, img_h)
-                br_h, br_p = pixel_to_angular(x2, y2, slice_heading, request.pitch, request.slice_fov, img_w, img_h)
+                tl_h, tl_p = pixel_to_angular(x1, y1, slice_heading, request.pitch, slice_fov, img_w, img_h)
+                tr_h, tr_p = pixel_to_angular(x2, y1, slice_heading, request.pitch, slice_fov, img_w, img_h)
+                bl_h, bl_p = pixel_to_angular(x1, y2, slice_heading, request.pitch, slice_fov, img_w, img_h)
+                br_h, br_p = pixel_to_angular(x2, y2, slice_heading, request.pitch, slice_fov, img_w, img_h)
 
                 # Angular width: average of top and bottom edge spans
                 top_w = tr_h - tl_h
@@ -920,16 +1018,28 @@ async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
                 # Angular height: average of left and right edge spans
                 ang_h = abs(((tl_p - bl_p) + (tr_p - br_p)) / 2)
 
-                # Calibrate depth using sign panel height reference
+                # Infer panel configuration and calibrate depth using inferred sign height
+                inferred_height_cm, panel_layout = infer_sign_cluster_height(ang_h, ang_w, source_detections_count=1)
+                reference_height_m = inferred_height_cm / 100.0
+                pixel_size = int(max(x2 - x1, y2 - y1))  # Use max dimension as bbox size
+                depth_calibrated = None
+                size_correction = None
+
                 if det_depth_m_raw is not None and ang_h > 0:
                     ang_h_rad = math.radians(ang_h)
-                    inferred_sign_height = 2 * det_depth_m_raw * math.tan(ang_h_rad / 2)
-                    if inferred_sign_height > 0:
-                        # Calibrate raw depth using 0.45m reference sign height
-                        det_depth_m = det_depth_m_raw * (0.45 / inferred_sign_height)
+                    # Estimated height from depth + angular size
+                    estimated_height_m = 2 * det_depth_m_raw * math.tan(ang_h_rad / 2)
+                    if estimated_height_m > 0:
+                        # Single-reference calibration: scale factor from inferred height
+                        scale_factor = reference_height_m / estimated_height_m
+                        det_depth_m = det_depth_m_raw * scale_factor
+                        depth_calibrated = det_depth_m
+
                         # Convert camera-relative depth (Z along ray) to horizontal along-road distance
                         pitch_rad = math.radians(center_pitch)
                         det_depth_m = det_depth_m * math.cos(pitch_rad)
+                        if depth_calibrated:
+                            depth_calibrated = depth_calibrated * math.cos(pitch_rad)
 
                 all_angular_dets.append(AngularDetection(
                     heading=center_heading,
@@ -940,6 +1050,11 @@ async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
                     class_name=cls_name,
                     depth_anything_meters=det_depth_m,
                     depth_anything_meters_raw=det_depth_m_raw,
+                    inferred_panel_layout=panel_layout,
+                    reference_height_cm=inferred_height_cm,
+                    depth_calibrated=depth_calibrated,
+                    pixel_size=pixel_size,
+                    size_correction=size_correction,
                 ))
 
     print(f"Panorama detect: {len(all_angular_dets)} raw detections before NMS")
