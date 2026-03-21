@@ -1089,16 +1089,20 @@ OCR_PROMPT = """You are a parking sign parser. You will receive a cropped image 
 **CRITICAL: Respond with valid JSON only. No prose, no markdown headers, no explanations outside the JSON structure. Your entire response must be parseable by `JSON.parse()`.**
 
 ## Step 1 — Validate
-First, determine whether this image actually contains a parking or standing regulation sign. If it does NOT (e.g., it is a street name, speed limit, bus stop, construction sign, advertisement, utility pole, or any other non-parking object), respond ONLY with:
+A valid input is an image where **a single parking sign cluster is the primary subject**. A parking sign cluster is defined as one or more rectangular regulatory sign plates mounted on a single post, photographed close enough that the text on each plate is individually legible. The sign plates must convey parking/standing rules to drivers (permitted hours, time limits, payment requirements, no-parking restrictions, tow warnings, permit conditions).
+
+If the image does not match this definition exactly, respond ONLY with:
 ```
 {"is_parking_sign": false, "rejection_reason": "<brief description of what is actually shown>"}
 ```
-Do NOT attempt to extract parking rules from non-parking images.
+Do not attempt extraction from any image that does not meet this definition.
 
 ## Step 2 — Extract rules
-Every sign is treated as a sequence of one or more rules. A sign with a single restriction is simply a sequence of length one. Extract each rule as a separate entry in the `rules` array, ordered top to bottom.
+Every sign cluster is treated as a sequence of one or more rules. A cluster with a single plate is simply a sequence of length one. Extract each rule as a separate entry in the `rules` array, ordered top to bottom.
 
 **Payment splitting rule:** If a single sign plate allows parking with a time limit but payment is required on some days and free on others, split that plate into two separate rule entries — one for the paid days and one for the free days — even if the time window and limit are identical. This is in addition to any other splits required by different time windows or stacked plates.
+
+**Tow zones:** Tow enforcement is extracted separately from parking rules into the `tow_zones` array. Each tow zone entry captures the time window and direction in which towing is enforced. Do not mix tow zone entries into the `rules` array.
 
 Your entire response must conform exactly to this JSON structure:
 ```
@@ -1107,7 +1111,7 @@ Your entire response must conform exactly to this JSON structure:
   "confidence_readable": "high" | "medium" | "low",
   "rules": [
     {
-      "action": "no_parking" | "no_standing" | "no_stopping" | "parking_allowed" | "tow_zone" | "loading_zone" | "permit_required" | "time_limit",
+      "category": "no_parking" | "no_standing" | "no_stopping" | "parking_allowed" | "loading_zone" | "permit_required",
       "time_limit_minutes": <integer or null>,
       "days": ["mon","tue","wed","thu","fri","sat","sun"] or null,
       "time_start": "HH:MM" or null,
@@ -1115,7 +1119,16 @@ Your entire response must conform exactly to this JSON structure:
       "payment_required": true | false | null,
       "permit_zone": "<zone identifier string or null>",
       "arrow_direction": "left" | "right" | "both" | "none" | null,
-      "additional_text": "<any other text on this part of the sign>"
+      "additional_text": "<any other text on this part of the sign or null>"
+    }
+  ],
+  "tow_zones": [
+    {
+      "days": ["mon","tue","wed","thu","fri","sat","sun"] or null,
+      "time_start": "HH:MM" or null,
+      "time_end": "HH:MM" or null,
+      "arrow_direction": "left" | "right" | "both" | "none" | null,
+      "additional_text": "<any other text on this tow plate or null>"
     }
   ],
   "raw_text": "<all text you can read on the sign, top to bottom, separated by newlines>",
@@ -1124,10 +1137,10 @@ Your entire response must conform exactly to this JSON structure:
 ```
 
 ## Field guidance
-- **`action`:** Describes what the rule permits or prohibits during its window.
+- **`category`:** `"parking_allowed"` covers all cases where parking is permitted, whether free or paid, with or without a time limit. Use `time_limit_minutes` and `payment_required` to distinguish the specifics. All other categories describe restrictions or prohibitions.
 - **`payment_required`:** `true` if a meter, pay station, or "PAY" instruction applies. `false` if parking is free during this window. `null` if not determinable from the sign.
 - **`days`:** List only the days this specific rule applies to. `"MON THRU FRI"` → `["mon","tue","wed","thu","fri"]`. `"EXCEPT SUNDAY"` → all days except Sunday.
-- **`time_start` / `time_end`:** 24-hour format. `"7AM"` → `"07:00"`, `"6P"` → `"18:00"`.
+- **`time_start` / `time_end`:** 24-hour format. `"7AM"` → `"07:00"`, `"6P"` → `"18:00"`. Never infer times from phone numbers, stall numbers, zone codes, or any other reference information printed on the sign — put those in `additional_text` or `notes` instead.
 - **`arrow_direction`:** Direction from the sign post that this rule applies to.
 - **`confidence_readable`:** Reflects the hardest-to-read rule on the sign. If any plate is partially occluded or at a steep angle, set to `"low"` and explain in `"notes"`.
 - Do NOT hallucinate text. If you cannot read a word, write `[illegible]` in `raw_text` and note it.
@@ -1144,6 +1157,7 @@ class OcrSignResponse(BaseModel):
     is_parking_sign: bool
     confidence_readable: Optional[str] = None
     rules: Optional[list[dict]] = None
+    tow_zones: Optional[list[dict]] = None
     raw_text: Optional[str] = None
     notes: Optional[str] = None
     rejection_reason: Optional[str] = None
@@ -1226,6 +1240,7 @@ async def ocr_sign(request: OcrSignRequest):
         is_parking_sign=parsed.get("is_parking_sign", False),
         confidence_readable=parsed.get("confidence_readable"),
         rules=parsed.get("rules"),
+        tow_zones=parsed.get("tow_zones"),
         raw_text=parsed.get("raw_text"),
         notes=parsed.get("notes"),
         rejection_reason=parsed.get("rejection_reason"),

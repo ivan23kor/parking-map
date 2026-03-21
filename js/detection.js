@@ -1613,16 +1613,14 @@ function showOcrModal(ocrResult, x, y) {
       <div style="color: #9ca3af; font-size: 11px; margin-top: 4px;">${ocrResult?.rejection_reason || "Unknown"}</div>`;
   } else {
     const rulesHtml = (ocrResult.rules || []).map((rule, i) => {
-      const actionColor = {
+      const categoryColor = {
         no_parking: "#ef4444",
         no_standing: "#f97316",
         no_stopping: "#dc2626",
         parking_allowed: "#22c55e",
-        time_limit: "#3b82f6",
         loading_zone: "#8b5cf6",
         permit_required: "#f59e0b",
-        tow_zone: "#dc2626",
-      }[rule.action] || "#9ca3af";
+      }[rule.category] || "#9ca3af";
 
       const daysStr = rule.days ? rule.days.map(d => d.toUpperCase()).join(", ") : "Any day";
       const timeStr = rule.time_start && rule.time_end
@@ -1635,9 +1633,9 @@ function showOcrModal(ocrResult, x, y) {
         : "";
 
       return `
-        <div style="margin-bottom: 8px; padding: 8px; background: rgba(255,255,255,0.1); border-radius: 4px; border-left: 3px solid ${actionColor};">
-          <div style="font-weight: 600; color: ${actionColor}; text-transform: uppercase; font-size: 11px;">
-            ${rule.action.replace(/_/g, " ")}${arrowStr}
+        <div style="margin-bottom: 8px; padding: 8px; background: rgba(255,255,255,0.1); border-radius: 4px; border-left: 3px solid ${categoryColor};">
+          <div style="font-weight: 600; color: ${categoryColor}; text-transform: uppercase; font-size: 11px;">
+            ${rule.category.replace(/_/g, " ")}${arrowStr}
           </div>
           <div style="margin-top: 4px; font-size: 12px;">
             ${daysStr}<br/>
@@ -1648,12 +1646,36 @@ function showOcrModal(ocrResult, x, y) {
       `;
     }).join("");
 
+    const towZonesHtml = (ocrResult.tow_zones || []).map((tz, i) => {
+      const daysStr = tz.days ? tz.days.map(d => d.toUpperCase()).join(", ") : "Any day";
+      const timeStr = tz.time_start && tz.time_end
+        ? `${tz.time_start}–${tz.time_end}`
+        : "Any time";
+      const arrowStr = tz.arrow_direction && tz.arrow_direction !== "none"
+        ? ` ${tz.arrow_direction === "left" ? "←" : tz.arrow_direction === "right" ? "→" : "↔"}`
+        : "";
+
+      return `
+        <div style="margin-bottom: 8px; padding: 8px; background: rgba(220, 38, 38, 0.2); border-radius: 4px; border-left: 3px solid #dc2626;">
+          <div style="font-weight: 600; color: #dc2626; text-transform: uppercase; font-size: 11px;">
+            🚨 TOW ZONE${arrowStr}
+          </div>
+          <div style="margin-top: 4px; font-size: 12px;">
+            ${daysStr}<br/>
+            ${timeStr}
+          </div>
+          ${tz.additional_text ? `<div style="color: #9ca3af; font-size: 11px; margin-top: 2px;">${tz.additional_text}</div>` : ""}
+        </div>
+      `;
+    }).join("");
+
     ocrModalEl.innerHTML = `
       <div style="font-weight: 600; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
         <span>Parking Rules</span>
         <span style="font-size: 10px; color: #9ca3af;">${ocrResult.confidence_readable || "medium"} confidence</span>
       </div>
       ${rulesHtml || "<div style='color: #9ca3af;'>No rules extracted</div>"}
+      ${towZonesHtml ? `<div style="margin-top: 12px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.2);">${towZonesHtml}</div>` : ""}
       ${ocrResult.raw_text ? `<details style="margin-top: 8px;"><summary style="cursor: pointer; color: #9ca3af; font-size: 11px;">Raw text</summary><pre style="margin: 4px 0 0; font-size: 10px; white-space: pre-wrap; color: #d1d5db;">${ocrResult.raw_text}</pre></details>` : ""}
       ${ocrResult.notes ? `<div style="margin-top: 8px; color: #fbbf24; font-size: 11px;">⚠️ ${ocrResult.notes}</div>` : ""}
     `;
