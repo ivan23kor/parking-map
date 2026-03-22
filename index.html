@@ -1175,13 +1175,100 @@
           const arrangement = msf > 0.5 ? "vertically stacked" : msf < 0.2 ? "side by side" : "cluster";
           layoutInfo = `<span>${signCount} signs (${arrangement})</span>`;
         }
+
+        // Build OCR section
+        let ocrSection = "";
+        if (state.ocrLoading) {
+          ocrSection = `
+            <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #e5e7eb;">
+              <div class="preview-loading">Extracting text...</div>
+            </div>
+          `;
+        } else if (state.ocrError) {
+          ocrSection = `
+            <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #e5e7eb;">
+              <div class="preview-error">${state.ocrError}</div>
+            </div>
+          `;
+        } else if (state.ocrResult) {
+          const ocrHtml = buildOcrResultHtml(state.ocrResult);
+          ocrSection = `
+            <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #e5e7eb;">
+              ${ocrHtml}
+            </div>
+          `;
+        }
+
         container.innerHTML = `
-                <img src="${state.src}" alt="Detected parking sign preview">
-                <div class="sign-info">
-                  <span>Est: ${sign.distance?.toFixed(1)}m</span>
-                  ${layoutInfo}
-                </div>
-            `;
+          <img src="${state.src}" alt="Detected parking sign preview">
+          <div class="sign-info">
+            <span>Est: ${sign.distance?.toFixed(1)}m</span>
+            ${layoutInfo}
+          </div>
+          ${ocrSection}
+        `;
+      }
+
+      function buildOcrResultHtml(ocrResult) {
+        if (!ocrResult || !ocrResult.is_parking_sign) {
+          return `<div class="preview-error">${ocrResult?.rejection_reason || "Not a parking sign"}</div>`;
+        }
+
+        const rulesHtml = (ocrResult.rules || []).map((rule) => {
+          const daysStr = rule.days ? rule.days.map(d => d.toUpperCase()).join(", ") : "Any day";
+          const timeStr = rule.time_start && rule.time_end
+            ? `${rule.time_start}–${rule.time_end}`
+            : "Any time";
+          const limitStr = rule.time_limit_minutes ? `${rule.time_limit_minutes}min` : "";
+          const payStr = rule.payment_required === true ? "💰" : rule.payment_required === false ? "🆓" : "";
+          const arrowStr = rule.arrow_direction && rule.arrow_direction !== "none"
+            ? ` ${rule.arrow_direction === "left" ? "←" : rule.arrow_direction === "right" ? "→" : "↔"}`
+            : "";
+
+          const categoryColor = RULE_CATEGORY_COLORS[rule.category] || "#9ca3af";
+          return `
+            <div style="margin-bottom: 6px; padding: 6px; background: rgba(255,255,255,0.1); border-radius: 4px; border-left: 3px solid ${categoryColor};">
+              <div style="font-weight: 600; color: ${categoryColor}; text-transform: uppercase; font-size: 10px;">
+                ${rule.category.replace(/_/g, " ")}${arrowStr}
+              </div>
+              <div style="margin-top: 2px; font-size: 11px;">
+                ${daysStr}<br/>
+                ${timeStr} ${limitStr} ${payStr}
+              </div>
+              ${rule.additional_text ? `<div style="color: #9ca3af; font-size: 10px; margin-top: 2px;">${rule.additional_text}</div>` : ""}
+            </div>
+          `;
+        }).join("");
+
+        const towZonesHtml = (ocrResult.tow_zones || []).map((tz) => {
+          const daysStr = tz.days ? tz.days.map(d => d.toUpperCase()).join(", ") : "Any day";
+          const timeStr = tz.time_start && tz.time_end
+            ? `${tz.time_start}–${tz.time_end}`
+            : "Any time";
+          const arrowStr = tz.arrow_direction && tz.arrow_direction !== "none"
+            ? ` ${tz.arrow_direction === "left" ? "←" : tz.arrow_direction === "right" ? "→" : "↔"}`
+            : "";
+
+          return `
+            <div style="margin-bottom: 6px; padding: 6px; background: rgba(220, 38, 38, 0.2); border-radius: 4px; border-left: 3px solid #dc2626;">
+              <div style="font-weight: 600; color: #dc2626; text-transform: uppercase; font-size: 10px;">
+                🚨 TOW ZONE${arrowStr}
+              </div>
+              <div style="margin-top: 2px; font-size: 11px;">
+                ${daysStr}<br/>
+                ${timeStr}
+              </div>
+              ${tz.additional_text ? `<div style="color: #9ca3af; font-size: 10px; margin-top: 2px;">${tz.additional_text}</div>` : ""}
+            </div>
+          `;
+        }).join("");
+
+        return `
+          <div style="font-weight: 600; margin-bottom: 6px; font-size: 12px;">Parking Rules</div>
+          ${rulesHtml || "<div style='color: #9ca3af; font-size: 11px;'>No rules extracted</div>"}
+          ${towZonesHtml ? `<div style="margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.2);">${towZonesHtml}</div>` : ""}
+          ${ocrResult.raw_text ? `<details style="margin-top: 6px;"><summary style="cursor: pointer; color: #9ca3af; font-size: 10px;">Raw text</summary><pre style="margin: 4px 0 0; font-size: 9px; white-space: pre-wrap; color: #d1d5db; word-wrap: break-word;">${ocrResult.raw_text}</pre></details>` : ""}
+        `;
       }
 
       function toRadians(degrees) {
