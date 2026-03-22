@@ -773,7 +773,7 @@ async def detect(request: DetectionRequest):
 
     # Run inference
     t_yolo_start = time.time()
-    results = model.predict(image, conf=request.confidence, verbose=False)
+    results = model.predict(image, conf=request.confidence, imgsz=512, verbose=False)
     t_yolo = (time.time() - t_yolo_start) * 1000
 
     # Extract ultralytics internal timing
@@ -832,7 +832,7 @@ async def detect_debug(image_url: str, confidence: float = 0.15):
     draw = ImageDraw.Draw(image)
     
     # Run inference
-    results = model.predict(image, conf=confidence, verbose=False)
+    results = model.predict(image, conf=confidence, imgsz=512, verbose=False)
     
     # Draw boxes
     for r in results:
@@ -886,7 +886,7 @@ async def detect_file(file: UploadFile = File(...), confidence: float = 0.15):
 
     # Run inference
     start_time = time.time()
-    results = model.predict(image, conf=confidence, verbose=False)
+    results = model.predict(image, conf=confidence, imgsz=512, verbose=False)
     inference_time_ms = (time.time() - start_time) * 1000
 
     # Parse results
@@ -979,7 +979,7 @@ async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
             continue
 
         t_yolo_start = time.time()
-        yolo_results = model.predict(image, conf=request.confidence, verbose=False)
+        yolo_results = model.predict(image, conf=request.confidence, imgsz=512, verbose=False)
         t_yolo = (time.time() - t_yolo_start) * 1000
         total_yolo_ms += t_yolo
         yolo_speed = yolo_results[0].speed if yolo_results else {}
