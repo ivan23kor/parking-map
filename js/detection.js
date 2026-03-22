@@ -3663,13 +3663,19 @@ function buildRuleCurveLatLngs(sign, wayGeometry, direction, ruleIndex, maxDista
   const anchor = projectPointOntoWayGeometry(sign.lat, sign.lng, wayGeometry, sign.segmentIndex ?? null);
   if (!anchor) return null;
 
+  // Align walk direction with traffic bearing (way geometry array order may oppose traffic flow)
+  const anchorBearing = getWaySegmentBearing(wayGeometry, anchor.segmentIndex, sign.trafficBearing);
+  const walkDirectionSign =
+    Math.abs(signedAngleDeltaDegrees(anchorBearing, sign.trafficBearing)) <= 90 ? 1 : -1;
+
   const points = [];
   for (let d = 0; d <= maxDistanceMeters; d += RULE_CURVE_SAMPLE_STEP_METERS) {
-    const walked = walkWayGeometryByDistance(wayGeometry, anchor, direction * d);
+    const walked = walkWayGeometryByDistance(wayGeometry, anchor, direction * walkDirectionSign * d);
     if (!walked) continue;
 
-    const segBearing = getWaySegmentBearing(wayGeometry, walked.segmentIndex, sign.trafficBearing);
-    if (!Number.isFinite(segBearing)) continue;
+    const rawSegBearing = getWaySegmentBearing(wayGeometry, walked.segmentIndex, sign.trafficBearing);
+    if (!Number.isFinite(rawSegBearing)) continue;
+    const segBearing = orientBearingToMatch(sign.trafficBearing, rawSegBearing);
 
     const lateralBearing = side === "right"
       ? normalizeBearingDegrees(segBearing + 90)

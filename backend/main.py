@@ -6,6 +6,7 @@ import base64
 import asyncio
 import io
 import math
+import os
 import re
 import json as _json
 import time

@@ -222,6 +222,22 @@
         background: #fff;
       }
 
+      .ocr-tooltip {
+        background: rgba(0, 0, 0, 0.8);
+        color: #fff;
+        border: none;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 1.4;
+        padding: 3px 6px;
+        white-space: pre-line;
+        border-radius: 4px;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+      }
+      .ocr-tooltip::before {
+        border-top-color: rgba(0, 0, 0, 0.8);
+      }
+
       .sign-preview-popup {
         min-width: 180px;
       }
@@ -966,7 +982,6 @@
         console.log("Loaded sign map data on parksight:", data);
 
         const projectedMarkerRadius = 10 / 3;
-        const boundsPoints = [];
         let totalSigns = 0;
 
         detections.forEach((detection, detectionIndex) => {
@@ -1016,7 +1031,6 @@
               `Projected signs: ${signCount}`,
           );
 
-          boundsPoints.push([detection.camera.lat, detection.camera.lng]);
 
           for (const sign of detection.signs || []) {
             if (!sign.panoId && detection.panoId) {
@@ -1032,6 +1046,17 @@
               fillOpacity: 0.65,
             }).addTo(signMarkersLayer);
 
+            // Show OCR summary as permanent tooltip
+            const ocrLabel = buildOcrTooltipText(sign.ocrResult);
+            if (ocrLabel) {
+              signCircle.bindTooltip(ocrLabel, {
+                permanent: true,
+                direction: "top",
+                offset: [0, -8],
+                className: "ocr-tooltip",
+              });
+            }
+
             signCircle.bindPopup(createSignPreviewPopupHtml(sign), {
               maxWidth: 220,
             });
@@ -1039,7 +1064,6 @@
               loadSignPreview(sign, event.popup);
             });
 
-            boundsPoints.push([sign.lat, sign.lng]);
           }
         });
 
@@ -1047,9 +1071,7 @@
           `Rendered ${totalSigns} projected sign markers across ${detections.length} panorama detections from ${data.source || "unknown source"}`,
         );
 
-        if (boundsPoints.length > 0) {
-          map.fitBounds(boundsPoints, { padding: [60, 60], maxZoom: 19 });
-        }
+
 
         renderRuleCurves(data);
       }
@@ -1133,6 +1155,24 @@
             });
           }
         }
+      }
+
+      function buildOcrTooltipText(ocrResult) {
+        if (!ocrResult?.is_parking_sign) return null;
+        const parts = [];
+        for (const rule of ocrResult.rules || []) {
+          let s = (rule.category || "").replace(/_/g, " ").toUpperCase();
+          if (rule.time_limit_minutes) s += ` ${rule.time_limit_minutes}min`;
+          if (rule.time_start && rule.time_end) s += ` ${rule.time_start}-${rule.time_end}`;
+          if (rule.days?.length) s += ` ${rule.days.map(d => d.slice(0, 3)).join(",")}`;
+          parts.push(s);
+        }
+        for (const tz of ocrResult.tow_zones || []) {
+          let s = "TOW ZONE";
+          if (tz.time_start && tz.time_end) s += ` ${tz.time_start}-${tz.time_end}`;
+          parts.push(s);
+        }
+        return parts.length ? parts.join("\n") : null;
       }
 
       function createSignPreviewPopupHtml(sign) {
