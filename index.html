@@ -1541,9 +1541,17 @@
           ?.querySelector(`#${sign.previewContainerId}`);
         if (!container) return;
 
+        // Determine OCR state
+        const ocrLoading = !sign.ocrResult;
+        const ocrError = sign.ocrError || null;
+        const ocrResult = sign.ocrResult || null;
+
         renderSignPreviewContent(container, sign, {
           src: sign.previewSrc || null,
           error: sign.previewError || null,
+          ocrLoading,
+          ocrError,
+          ocrResult,
         });
 
         if (
@@ -1562,6 +1570,9 @@
           sign.previewError = "Preview unavailable for this sign.";
           renderSignPreviewContent(container, sign, {
             error: sign.previewError,
+            ocrLoading,
+            ocrError,
+            ocrResult,
           });
           return;
         }
@@ -1581,7 +1592,12 @@
               previewPanoId,
             );
             sign.previewSrc = preview.src;
-            renderSignPreviewContent(container, sign, { src: sign.previewSrc });
+            renderSignPreviewContent(container, sign, {
+              src: sign.previewSrc,
+              ocrLoading,
+              ocrError,
+              ocrResult,
+            });
           }
 
           const refinedView = await refinePreviewViewWithPanoramaDetection(
@@ -1604,6 +1620,9 @@
           sign.previewError = "Preview unavailable.";
           renderSignPreviewContent(container, sign, {
             error: sign.previewError,
+            ocrLoading,
+            ocrError,
+            ocrResult,
           });
           if (latestRenderedSignMapData) {
             persistLatestSignMapData(latestRenderedSignMapData);
