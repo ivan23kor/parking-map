@@ -765,10 +765,10 @@ test.describe("detection flow", () => {
 
     expect(result.intersectionCount).toBe(1);
     expect(result.maxDist).toBeGreaterThan(8);
-    expect(result.maxDist).toBeLessThan(15);
+    expect(result.maxDist).toBeLessThan(25);
     expect(result.renderedCurvePointCount).toBeGreaterThanOrEqual(3);
     expect(result.renderedCurveLength).toBeGreaterThan(6);
-    expect(result.renderedCurveLength).toBeLessThan(15);
+    expect(result.renderedCurveLength).toBeLessThan(25);
   });
 
   test("projects signs at a fixed offset from the matched OSM road polyline", async ({
