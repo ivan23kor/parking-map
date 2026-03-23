@@ -273,12 +273,68 @@ function findNearestStreetContext(lat, lon, ways) {
                     lon: segmentEnd.lon
                 },
                 wayGeometry: nodes.map(n => ({ lat: n.lat, lon: n.lon })),
-                segmentIndex: i
+                segmentIndex: i,
+                allWays: ways
             };
         }
     }
 
     return nearest;
+}
+
+/**
+ * Find nodes in wayGeometry that are shared with other ways (street intersections).
+ * @param {Array} wayGeometry - Nodes of the main way [{lat, lon}, ...]
+ * @param {Array} allWays - All ways in the area from Overpass [{geometry, tags}, ...]
+ * @returns {Array} Intersection nodes [{lat, lon, nodeIndex}, ...]
+ */
+function findIntersectionNodes(wayGeometry, allWays) {
+    if (!wayGeometry || wayGeometry.length === 0 || !allWays || allWays.length === 0) {
+        return [];
+    }
+
+    const PRECISION = 5; // ~1m at equator
+    const coordKeyToWayCount = new Map();
+
+    // Count how many ways each coordinate appears in
+    for (const way of allWays) {
+        const nodes = way.geometry || [];
+        const seenKeys = new Set(); // Avoid double-counting same node in same way
+
+        for (const node of nodes) {
+            const lat = node.lat;
+            const lng = node.lon ?? node.lng;
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+
+            const key = `${lat.toFixed(PRECISION)},${lng.toFixed(PRECISION)}`;
+            if (!seenKeys.has(key)) {
+                seenKeys.add(key);
+                coordKeyToWayCount.set(key, (coordKeyToWayCount.get(key) || 0) + 1);
+            }
+        }
+    }
+
+    // Find wayGeometry nodes appearing in 2+ ways (intersections)
+    const intersectionNodes = [];
+    for (let nodeIdx = 0; nodeIdx < wayGeometry.length; nodeIdx++) {
+        const node = wayGeometry[nodeIdx];
+        const lat = node.lat;
+        const lng = node.lon ?? node.lng;
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+
+        const key = `${lat.toFixed(PRECISION)},${lng.toFixed(PRECISION)}`;
+        const wayCount = coordKeyToWayCount.get(key) || 0;
+
+        if (wayCount >= 2) {
+            intersectionNodes.push({
+                lat,
+                lng,
+                nodeIndex: nodeIdx,
+            });
+        }
+    }
+
+    return intersectionNodes;
 }
 
 async function fetchNearestStreetContext(lat, lon, radiusMeters = 120) {
