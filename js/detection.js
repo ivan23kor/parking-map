@@ -3786,8 +3786,17 @@ function findDistanceToNearestCorner(
     const distanceMeters = Math.abs(signedDistance);
     if (distanceMeters <= RULE_CURVE_INTERSECTION_SKIP_METERS) continue;
 
-    if (distanceMeters < nearestIntersection) {
-      nearestIntersection = distanceMeters;
+    // Extend past the centerline node to the actual curb corner
+    // by adding the widest cross-street’s road-edge half-width.
+    let cornerExtension = 0;
+    for (const tags of node.crossStreetTags || []) {
+      const halfWidth = estimateRoadEdgeOffsetMeters(tags);
+      if (halfWidth > cornerExtension) cornerExtension = halfWidth;
+    }
+
+    const adjustedDistance = distanceMeters + cornerExtension;
+    if (adjustedDistance < nearestIntersection) {
+      nearestIntersection = adjustedDistance;
     }
   }
 
