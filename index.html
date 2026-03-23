@@ -1021,6 +1021,17 @@
             ).addTo(signMarkersLayer);
           }
 
+          // Add dashed road centerline marker
+          const roadMarkerLatLngs = buildDetectionRoadMarkerLatLngs(detection);
+          if (roadMarkerLatLngs && roadMarkerLatLngs.length >= 2) {
+            L.polyline(roadMarkerLatLngs, {
+              color: "#f59e0b",
+              dashArray: "10 8",
+              weight: 3,
+              opacity: 0.65,
+            }).addTo(signMarkersLayer);
+          }
+
           const signCount = Array.isArray(detection.signs)
             ? detection.signs.length
             : 0;
