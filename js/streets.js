@@ -236,6 +236,9 @@ function distanceToSegmentMeters(point, start, end) {
 
     return Math.hypot(point.x - closestX, point.y - closestY);
 }
+function getWayNodeLng(node) {
+    return node?.lon ?? node?.lng ?? null;
+}
 
 function findNearestStreetContext(lat, lon, ways) {
     const point = { x: 0, y: 0 };
@@ -246,8 +249,19 @@ function findNearestStreetContext(lat, lon, ways) {
         for (let i = 0; i < nodes.length - 1; i++) {
             const segmentStart = nodes[i];
             const segmentEnd = nodes[i + 1];
-            const start = toLocalMeters(segmentStart.lat, segmentStart.lon, lat, lon);
-            const end = toLocalMeters(segmentEnd.lat, segmentEnd.lon, lat, lon);
+            const segmentStartLng = getWayNodeLng(segmentStart);
+            const segmentEndLng = getWayNodeLng(segmentEnd);
+            if (
+                !Number.isFinite(segmentStart?.lat) ||
+                !Number.isFinite(segmentStartLng) ||
+                !Number.isFinite(segmentEnd?.lat) ||
+                !Number.isFinite(segmentEndLng)
+            ) {
+                continue;
+            }
+
+            const start = toLocalMeters(segmentStart.lat, segmentStartLng, lat, lon);
+            const end = toLocalMeters(segmentEnd.lat, segmentEndLng, lat, lon);
             const distanceMeters = distanceToSegmentMeters(point, start, end);
 
             if (nearest && distanceMeters >= nearest.distanceMeters) {
@@ -257,8 +271,8 @@ function findNearestStreetContext(lat, lon, ways) {
             nearest = {
                 distanceMeters,
                 bearing: turf.bearing(
-                    turf.point([segmentStart.lon, segmentStart.lat]),
-                    turf.point([segmentEnd.lon, segmentEnd.lat])
+                    turf.point([segmentStartLng, segmentStart.lat]),
+                    turf.point([segmentEndLng, segmentEnd.lat])
                 ),
                 oneway: way.tags.oneway || null,
                 highway: way.tags.highway || null,
@@ -266,13 +280,13 @@ function findNearestStreetContext(lat, lon, ways) {
                 streetName: way.tags.name || 'Unknown street',
                 segmentStart: {
                     lat: segmentStart.lat,
-                    lon: segmentStart.lon
+                    lon: segmentStartLng
                 },
                 segmentEnd: {
                     lat: segmentEnd.lat,
-                    lon: segmentEnd.lon
+                    lon: segmentEndLng
                 },
-                wayGeometry: nodes.map(n => ({ lat: n.lat, lon: n.lon })),
+                wayGeometry: nodes.map(n => ({ lat: n.lat, lon: getWayNodeLng(n) })),
                 segmentIndex: i,
                 allWays: ways
             };
