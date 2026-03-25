@@ -46,16 +46,11 @@ test.describe("Street Intersection Detection E2E (real OSM data)", () => {
       // Find all Vassar Street ways
       const vassarWays = ways.filter((w) => w.tags?.name === "Vassar Street");
 
-      // Collect ALL intersections across all Vassar Street ways
-      const allIntersections = [];
-      for (const vassar of vassarWays) {
-        const intersections = findIntersectionNodes(vassar.geometry, ways);
-        for (const inter of intersections) {
-          inter.wayId = vassar.id;
-          allIntersections.push(inter);
-        }
+      // Collect ALL intersections across all Vassar Street ways (deduplicated)
+      const allIntersections = findAllIntersections(vassarWays, ways);
 
-        // Draw each Vassar Street segment
+      // Draw each Vassar Street segment
+      for (const vassar of vassarWays) {
         const coords = vassar.geometry.map((n) => [n.lat, n.lng ?? n.lon]);
         L.polyline(coords, { color: "#3b82f6", weight: 4, opacity: 0.8 }).addTo(map);
       }
@@ -87,7 +82,7 @@ test.describe("Street Intersection Detection E2E (real OSM data)", () => {
         totalVassarWays: vassarWays.length,
         intersectionCount: allIntersections.length,
         intersections: allIntersections.map((n) => ({
-          wayId: n.wayId,
+          wayIds: n.wayIds,
           nodeIndex: n.nodeIndex,
           lat: n.lat,
           lng: n.lng,

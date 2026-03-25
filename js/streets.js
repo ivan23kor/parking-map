@@ -462,3 +462,40 @@ async function fetchNearestStreetContext(lat, lon, radiusMeters = 120) {
     const ways = await fetchStreets(createBoundsAroundPoint(lat, lon, radiusMeters));
     return findNearestStreetContext(lat, lon, ways);
 }
+
+/**
+ * Find all unique intersections for multiple ways, deduplicated by coordinate.
+ * When a street is split into multiple OSM ways, shared intersection nodes get
+ * reported by each way. This function merges duplicates by coordinate key.
+ * @param {Array} ways - Ways to find intersections for (e.g., all "Vassar Street" ways)
+ * @param {Array} allWays - All ways in area (for cross-street detection)
+ * @returns {Array} Deduplicated intersection nodes with merged wayIds
+ */
+function findAllIntersections(ways, allWays) {
+    const PRECISION = 5; // Must match findIntersectionNodes
+    const intersectionMap = new Map(); // coordKey -> intersection data
+
+    for (const way of ways) {
+        const intersections = findIntersectionNodes(way.geometry, allWays);
+
+        for (const inter of intersections) {
+            const key = `${inter.lat.toFixed(PRECISION)},${inter.lng.toFixed(PRECISION)}`;
+
+            if (intersectionMap.has(key)) {
+                // Merge wayId into existing entry
+                const existing = intersectionMap.get(key);
+                if (!existing.wayIds.includes(way.id)) {
+                    existing.wayIds.push(way.id);
+                }
+            } else {
+                // New intersection
+                intersectionMap.set(key, {
+                    ...inter,
+                    wayIds: [way.id],
+                });
+            }
+        }
+    }
+
+    return Array.from(intersectionMap.values());
+}
