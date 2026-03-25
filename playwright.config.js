@@ -13,6 +13,7 @@ module.exports = defineConfig({
     baseURL: "http://127.0.0.1:8080",
     headless: process.env.HEADLESS !== "false", // Run headless by default, use HEADLESS=false for headed
     viewport: { width: 1280, height: 720 },
+    trace: "on", // Record trace for all tests (view with: npx playwright show-trace trace.zip)
   },
   webServer: {
     command: "bun run serve",
