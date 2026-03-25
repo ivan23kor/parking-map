@@ -1142,6 +1142,8 @@ Every sign cluster is treated as a sequence of one or more rules. A cluster with
 
 **Tow zones:** Tow enforcement is extracted separately from parking rules into the `tow_zones` array. Each tow zone entry captures the time window and direction in which towing is enforced. Do not mix tow zone entries into the `rules` array.
 
+**Arrow direction per plate:** Each rule or tow_zone entry must use the arrow direction that appears on THAT SPECIFIC PLATE only. If a sign has multiple stacked plates with different arrows, do NOT apply one plate's arrow to another. If a plate has no visible arrow, set `arrow_direction` to `null` or `"none"`, not the arrow from a different plate.
+
 Your entire response must conform exactly to this JSON structure:
 ```
 {
@@ -1179,7 +1181,7 @@ Your entire response must conform exactly to this JSON structure:
 - **`payment_required`:** `true` if a meter, pay station, or "PAY" instruction applies. `false` if parking is free during this window. `null` if not determinable from the sign.
 - **`days`:** List only the days this specific rule applies to. `"MON THRU FRI"` → `["mon","tue","wed","thu","fri"]`. `"EXCEPT SUNDAY"` → all days except Sunday.
 - **`time_start` / `time_end`:** 24-hour format. `"7AM"` → `"07:00"`, `"6P"` → `"18:00"`. Never infer times from phone numbers, stall numbers, zone codes, or any other reference information printed on the sign — put those in `additional_text` or `notes` instead.
-- **`arrow_direction`:** Direction from the sign post that this rule applies to.
+- **`arrow_direction`:** Direction from the sign post that this rule applies to. **CRITICAL:** Only use the arrow that appears on the same plate as this rule. Do NOT borrow arrows from other plates. If the plate has no arrow symbol, use `null` or `"none"`.
 - **`confidence_readable`:** Reflects the hardest-to-read rule on the sign. If any plate is partially occluded or at a steep angle, set to `"low"` and explain in `"notes"`.
 - Do NOT hallucinate text. If you cannot read a word, write `[illegible]` in `raw_text` and note it.
 - Do NOT add any text, commentary, or formatting outside the JSON object."""
