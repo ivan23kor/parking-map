@@ -1,173 +1,98 @@
 ---
-description: 
+description: Parksight project guidance for AI agents
 alwaysApply: true
 ---
 
-# AGENTS.md
+# PARKSIGHT AGENT GUIDE
 
-This file provides guidance when working with code in this repository.
+## Repo Structure
+1. **Static app** (`index.html`) — Leaflet + Turf + Google Maps JS API
+2. **Upload UI** (`ui-upload/`) — shadcn/ui component library
+3. **Backend** (`backend/`) — FastAPI YOLO11 detection service
 
-## Repo at a glance
-Three main parts:
-1. **Split panorama/2D map viewer** (`index.html`): Leaflet + Turf + Google Maps JS API with modular JS in `js/`
-2. **Next.js upload UI** (`ui-upload/`): shadcn/ui component library for uploading/detecting parking signs
-3. **Parking-sign ML backend** (`backend/`): FastAPI YOLO11 detection service + training pipeline (`datasets/`, `notebooks/`)
+## Commands
 
-## Common commands
-### Run static app locally
-- Start the full local stack in one command:
-  ```bash
-  GOOGLE_MAPS_API_KEY=... bun run start
-  ```
-  This starts:
-  - the static app on `http://127.0.0.1:8080`
-  - the FastAPI detection backend on `http://127.0.0.1:8000`
-  - backend and web logs under `logs/backend.log` and `logs/web.log`
-  - the stack only reports ready after the backend passes `GET /health`
-
-- Default startup path for agents:
-  ```bash
-  GOOGLE_MAPS_API_KEY=... bun run start
-  ```
-  `bun run start` and `bun run start:web` now both boot the full stack.
-
-- Start the web app with the full backend stack on `http://localhost:8080` (injects `GOOGLE_MAPS_API_KEY` from env):
-  ```bash
-  GOOGLE_MAPS_API_KEY=... bun run start:web
-  ```
-  This starts the backend and web server together so detection works immediately.
-
-- Serve only the static app on `http://localhost:8080` (injects `GOOGLE_MAPS_API_KEY` from env):
-  ```bash
-  GOOGLE_MAPS_API_KEY=... bun run serve:static
-  ```
-  Detection and preview requests will fail in this mode because the backend is not started.
-
-- Start only the backend:
-  ```bash
-  bun run start:backend
-  ```
-  This bootstraps `.venv` if needed and starts FastAPI on `http://127.0.0.1:8000`.
-
-- Serve Python version for the static files only:
-  ```bash
-  python3 serve.py
-  ```
-
-### Build Next.js upload UI
+### Run Stack
 ```bash
-bun run build    # Builds ui-upload/ to ui-upload/out/
+GOOGLE_MAPS_API_KEY=... bun run start    # Backend + web server
+GOOGLE_MAPS_API_KEY=... bun run start:web # Full stack, detection works
+GOOGLE_MAPS_API_KEY=... bun run serve:static # Backend-free mode
+GOOGLE_MAPS_API_KEY=... bun run start:backend # Backend only
+python3 serve.py  # Python-based static serve
 ```
 
-### Run UI end-to-end tests
-These tests cover the detection flow end to end with mocked Google Maps, Leaflet, and detection API responses. They verify:
-- detection falls back to single-view inference when panorama detection is unavailable
-- projected sign markers are persisted on the 2D map
-- curb-line projection stays parallel to the selected street segment
-
-Commands:
-```bash
-bun install
-bunx playwright install chromium
-bun run test:e2e
-```
-
-Files:
-- `tests/detection.e2e.spec.js`
-- `playwright.config.js`
-
-### Build ML training dataset
-```bash
-python3 datasets/build_unified_dataset.py
-```
-Expects source datasets under `datasets/` (gitignored, local-only). Writes to `datasets/parking-sign-detection-coco-dataset/`.
-
-### Run detection backend
-```bash
-# Preferred:
-bun run start:backend
-
-# Manual fallback:
-uv venv && uv pip install --python .venv/bin/python -r backend/requirements.txt
-.venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
-
-# Or with venv/pip:
-python3 -m venv .venv
-.venv/bin/pip install -r backend/requirements.txt
-.venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
-```
-
-### Train on Kaggle
-1. Upload `datasets/parking-sign-detection-coco-dataset/` to kaggle.com/datasets
-2. Import notebook from `notebooks/`
-3. Enable GPU, run
-
-See `notebooks/EXPERIMENT_7_README.md` for latest experiment details.
-
-## Architecture (big picture)
-### 1) Static web app (`index.html`)
-Split panorama/2D map viewer for parking sign detection.
-
-**File structure:**
-```
-config.js           # Google API key + detection API config
-js/
-├── utils.js        # Progress bar, error display
-├── streets.js      # Overpass API, street sampling with turf.bearing()
-├── panorama.js     # Shared panorama config (pitch, zoom, heading offset)
-├── streetview.js   # Session tokens, panoIds bulk fetch, panorama display
-└── detection.js    # YOLO detection API calls, bounding box rendering
-index.html          # Split panorama/2D map view
-```
-
-**Key pieces:**
-- **Map rendering:** Leaflet + OpenStreetMap tiles
-- **Selection workflow:** draw rectangle (button or Ctrl/⌘ drag) → fetch streets → check Street View coverage
-- **External APIs:**
-  - Overpass API (`https://overpass-api.de/api/interpreter`) — OSM streets in bbox
-  - Google Map Tiles API (`https://tile.googleapis.com/v1/streetview/panoIds`) — bulk panoId fetch (100 per request)
-  - Google Maps JS API (`StreetViewPanorama`) — panorama display
-- **Layers:** `streetsLayer`, `streetViewDotsLayer`, `selectionLayer` (Leaflet LayerGroups)
-- **Driver perspective:** `panorama.js` shared config. Heading = base direction ± 45° (right/left via `calculateHeadingWithSide()`), handles OSM `oneway` tag. Default pitch = 0.
-
-**Config coupling:**
-- `config.js` exports `window.GOOGLE_CONFIG.API_KEY` and `window.DETECTION_CONFIG`
-- Session tokens cached in `localStorage` (~13 days)
-
-### 2) Next.js upload UI (`ui-upload/`)
-shadcn/ui component library for uploading/detecting parking signs.
-
-**Build/run:**
+### Build UI
 ```bash
 cd ui-upload && bun install && bun run build
 ```
 
-### 3) Detection backend (`backend/`)
-FastAPI service running YOLO11 inference on Street View images.
+### Tests
+```bash
+bun install && bunx playwright install chromium && bun run test:e2e
+```
+**Debug:** `npx playwright test --debug` | `PWDEBUG=1 npx playwright test` | `HEADLESS=false npx playwright test`
 
-**API endpoints:**
+### ML Training
+```bash
+python3 datasets/build_unified_dataset.py  # Build dataset
+# Upload datasets/parking-sign-detection-coco-dataset/ to Kaggle
+# Import notebook from notebooks/
+```
+
+## Test Rules
+- Always run tests: `bun run test:e2e`
+- **Mandatory analysis after each run:**
+  - Locate `test-results/<test>/trace.zip`
+  - Check console logs for errors, warnings, failed requests
+  - Check screenshots/videos if present
+  - Report: confirmed issues, warnings, performance insights, hypotheses, recommendations
+
+## Architecture
+
+### Static App (`index.html`)
+```
+config.js           # Google API key + detection config
+js/
+├── utils.js        # Progress bar, error display
+├── streets.js      # Overpass API, street sampling, intersection detection
+├── panorama.js     # Shared panorama config (pitch, zoom, heading)
+├── streetview.js   # Session tokens, panoIds bulk fetch
+└── detection.js    # YOLO detection API calls
+index.html          # Split panorama/2D map view
+```
+
+**Key pieces:**
+- Map rendering: Leaflet + OSM tiles
+- Selection workflow: draw rectangle → fetch streets → check Street View
+- External APIs: Overpass API, Google Map Tiles API, Google Maps JS API
+- Layers: `streetsLayer`, `streetViewDotsLayer`, `selectionLayer`
+- Driver perspective: Heading ± 45°, handles OSM `oneway` tag
+
+**Config coupling:** `config.js` exports `GOOGLE_CONFIG.API_KEY` + `DETECTION_CONFIG`. Session tokens cached in `localStorage` (~13 days)
+
+### Upload UI (`ui-upload/`)
+shadcn/ui component library. Build: `bun install && bun run build`
+
+### Backend (`backend/`)
+FastAPI YOLO11 inference service.
+
+**Endpoints:**
 - `GET /health` — Health check
-- `POST /detect` — Run detection on image URL
-  - Request: `{"image_url": "...", "confidence": 0.15}`
-  - Response: `{"detections": [{"x1", "y1", "x2", "y2", "confidence", "class_name"}], "inference_time_ms": ...}`
-- `POST /detect-panorama` — Primary panorama detection endpoint (multi-slice inference)
-- `POST /detect-sahi` — Compatibility alias for panorama detection
-- `POST /crop-sign-tiles` — Fetch/stitch/crop Street View tiles at max zoom
-- `POST /preview-sign` — Fetch sign-centered Street View at tight FOV
-- `GET /detect-debug` — Return image with bounding boxes drawn
+- `POST /detect` — Single image detection
+- `POST /detect-panorama` — Multi-slice panorama detection
+- `POST /crop-sign-tiles` — Fetch/stitch/crop Street View tiles
+- `POST /preview-sign` — Sign-centered Street View
+- `GET /detect-debug` — Image with bounding boxes
 
-**Model:** Download from Kaggle → `backend/models/best.pt` (YOLO11m, 1 class: `parking_sign`)
+**Model:** YOLO11m, 1 class (`parking_sign`). Download from Kaggle → `backend/models/best.pt`
 
 **Detected signs:** Saved to `detected_signs/`, served at `/detected-signs/`
 
-### 4) ML/training (`datasets/`, `notebooks/`)
-Data flow:
-- Raw datasets in `datasets/` → `build_unified_dataset.py` → single-class YOLO dataset (512x512) with `data.yaml`
-- Training notebooks in `notebooks/` (numbered for experiment tracking)
-- See `notebooks/EXPERIMENT_7_README.md` for latest experiment details
+### ML Training (`datasets/`, `notebooks/`)
+Raw datasets → `build_unified_dataset.py` → single-class YOLO dataset (512x512). Training notebooks in `notebooks/` (numbered). See `notebooks/EXPERIMENT_7_README.md`
 
-## Sharp edges / mismatches
-- `package.json` references `src/index.html` but actual source is `index.html` at repo root (no `src/` dir)
-- `run-sign-detector.sh` and `start-sign-detector.sh` are compatibility wrappers around `scripts/start-stack.sh`
-- Detection requires backend on `http://127.0.0.1:8000` — `bun run start` and `bun run start:web` both start the full stack; `bun run serve:static` is backend-free on purpose
-- Training is on Kaggle, not locally — no Docker setup currently in use
+## Sharp Edges
+- `package.json` references `src/index.html` but actual source is `index.html` (no `src/`)
+- `run-sign-detector.sh` + `start-sign-detector.sh` → `scripts/start-stack.sh`
+- Detection requires backend on `http://127.0.0.1:8000` — `bun run start` + `bun run start:web` start full stack; `serve:static` backend-free on purpose
+- Training on Kaggle, not locally — no Docker setup
