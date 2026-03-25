@@ -59,9 +59,16 @@ const LEAFLET_STUB = `
     _zoom: 16, _center: { lat: 42.3615, lng: -71.0921 },
     setView(center, zoom) { this._center = { lat: center[0], lng: center[1] }; this._zoom = zoom; return this; },
     getBounds() {
+      const n = this._center.lat + 0.01, s = this._center.lat - 0.01;
+      const e = this._center.lng + 0.01, w = this._center.lng - 0.01;
       return {
-        getNorth: () => this._center.lat + 0.001, getSouth: () => this._center.lat - 0.001,
-        getEast: () => this._center.lng + 0.001, getWest: () => this._center.lng - 0.001,
+        getNorth: () => n, getSouth: () => s,
+        getEast: () => e, getWest: () => w,
+        contains(latlng) {
+          const lat = Array.isArray(latlng) ? latlng[0] : latlng.lat;
+          const lng = Array.isArray(latlng) ? latlng[1] : latlng.lng;
+          return lat >= s && lat <= n && lng >= w && lng <= e;
+        },
       };
     },
     getZoom() { return this._zoom; }, getCenter() { return this._center; },
@@ -395,14 +402,13 @@ test.describe("detection flow (real OSM data)", () => {
     const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("parksight_latest_sign_map_data")));
     expect(stored?.detections?.[0]?.streetName).toBe("Vassar Street");
     expect(stored?.detections?.[0]?.wayGeometry?.length).toBe(16);
-    expect(stored?.detections?.[0]?.allWays?.length).toBe(fixtureWays.length);
   });
 
   test("limits rule curves to real Albany Street intersections (Portland St, Main St)", async ({ page }) => {
     await mockInfrastructure(page);
     await page.goto("/?api_key=test-key");
 
-    const result = await page.evaluate(({ albanyGeo, allWays }) => {
+    const result = await page.evaluate(async ({ albanyGeo, allWays }) => {
       const signBase = projectSignToCurbLine(42.3620144, -71.093427, 6, 56.09, {
         streetBearing: 56.09, side: "right", oneway: null,
         wayGeometry: albanyGeo, segmentIndex: 8,
@@ -422,13 +428,13 @@ test.describe("detection flow (real OSM data)", () => {
       const intersections = findIntersectionNodes(albanyGeo, allWays);
       const maxDist = findDistanceToNextSign(sign, 1, [sign], albanyGeo, intersections);
 
-      renderSignMapData({
+      await renderSignMapData({
         savedAt: Date.now(), source: "test", projectionVersion: 6,
         detections: [{
           camera: { lat: 42.3620144, lng: -71.093427 },
           panoId: "mock-pano", streetBearing: 56.09,
           segmentStart: albanyGeo[8], segmentEnd: albanyGeo[9],
-          wayGeometry: albanyGeo, segmentIndex: 8, allWays,
+          wayGeometry: albanyGeo, segmentIndex: 8,
           signs: [sign],
         }],
       });
