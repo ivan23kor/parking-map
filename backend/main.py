@@ -1267,7 +1267,12 @@ async def ocr_sign(request: OcrSignRequest):
         # Remove markdown code blocks if present
         if content.startswith("```"):
             lines = content.split("\n")
-            content = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+            # Drop opening ```json line
+            lines = lines[1:]
+            # Drop closing ``` line (handle trailing whitespace)
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            content = "\n".join(lines)
 
         parsed = _json.loads(content)
     except _json.JSONDecodeError as e:
