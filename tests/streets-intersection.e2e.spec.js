@@ -101,6 +101,10 @@ test.describe("Street Intersection Detection E2E (real OSM data)", () => {
     console.log("Vassar Street ways found:", result.totalVassarWays);
     console.log("Intersections found:", JSON.stringify(result.intersections, null, 2));
 
+    // Screenshot BEFORE assertions so user can see the map
+    await page.screenshot({ path: '/tmp/playwright-intersection-pause.png', fullPage: true });
+    console.log("Screenshot saved to /tmp/playwright-intersection-pause.png");
+
     // Pause BEFORE assertions so user can see the map
     await page.pause();
 
