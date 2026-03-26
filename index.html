@@ -727,7 +727,7 @@
         return hasWayGeometry || hasSegment;
       }
 
-      async function ensureDetectionRoadContext(lat, lng) {
+      async function ensureDetectionRoadContext(lat, lng, allWays = null) {
         if (
           hasDetectionRoadContext(currentDetectionContext) ||
           !Number.isFinite(lat) ||
@@ -737,7 +737,7 @@
         }
 
         try {
-          const nearestStreet = await fetchNearestStreetContext(lat, lng);
+          const nearestStreet = await fetchNearestStreetContext(lat, lng, allWays);
           if (!nearestStreet) {
             return currentDetectionContext;
           }
@@ -969,7 +969,7 @@
         return pts;
       }
 
-      async function renderSignMapData(data) {
+      async function renderSignMapData(data, allWays = null) {
         latestRenderedSignMapData = data;
         signMarkersLayer.clearLayers();
 
@@ -1072,7 +1072,7 @@
 
 
 
-        await renderRuleCurves(data);
+        await renderRuleCurves(data, allWays);
       }
 
       function buildRulePopupHtml(rule, isTowZone = false) {
@@ -1103,48 +1103,83 @@
       const RULE_PRECEDENCE = { loading_zone: 4, permit_required: 3, no_parking: 2, parking_allowed: 1 };
 
       /**
-       * Select the highest-precedence rule that applies to a given arrow direction.
+       * Select the highest-precedence PARKING rule whose arrow direction explicitly matches
+       * the target direction. Rules with no arrow (null/"none") are intentionally excluded
+       * so they never override rules that have a known direction.
+       * Tow zones are handled separately via selectApplicableTowZones().
+       *
        * @param {Array} rules - OCR rules array
-       * @param {Array} towZones - OCR tow_zones array
        * @param {string} targetArrowDir - "left" or "right"
-       * @returns {Object|null} - Winning rule with {rule, isTowZone, ruleIndex} or null
+       * @returns {Object|null} - { rule, ruleIndex, precedence } or null
        */
-      function selectWinningRuleForArrowDirection(rules, towZones, targetArrowDir) {
+      function selectWinningRuleForArrowDirection(rules, targetArrowDir) {
         const candidates = [];
 
-        // Collect rules that apply to this arrow direction
         (rules || []).forEach((rule, idx) => {
           const arrowDir = rule.arrow_direction;
-          // Rule applies if arrow matches target, or arrow is "both"/"none"/undefined
-          if (arrowDir === targetArrowDir || arrowDir === "both" || !arrowDir || arrowDir === "none") {
-            candidates.push({ rule, isTowZone: false, ruleIndex: idx, precedence: RULE_PRECEDENCE[rule.category] || 0 });
-          }
-        });
-
-        // Collect tow zones that apply to this arrow direction (precedence = 2, same as no_parking)
-        (towZones || []).forEach((tz, idx) => {
-          const arrowDir = tz.arrow_direction;
-          if (arrowDir === targetArrowDir || arrowDir === "both" || !arrowDir || arrowDir === "none") {
-            candidates.push({ rule: tz, isTowZone: true, ruleIndex: idx, precedence: 2 });
+          // Only include rules with an EXPLICIT matching direction or "both".
+          // Rules with no arrow / "none" are skipped — they are ambiguous and
+          // must not override rules that carry a known arrow direction.
+          if (arrowDir === targetArrowDir || arrowDir === "both") {
+            const prec = RULE_PRECEDENCE[rule.category] || 0;
+            if (window.DEBUG_RULE_CURVES) {
+              console.log(`  [selectWinner:${targetArrowDir}] rule[${idx}] cat=${rule.category} arrow=${arrowDir} prec=${prec} → INCLUDED`);
+            }
+            candidates.push({ rule, ruleIndex: idx, precedence: prec });
+          } else if (window.DEBUG_RULE_CURVES) {
+            const reason = (!arrowDir || arrowDir === "none") ? 'no arrow — skipped' : 'wrong arrow';
+            console.log(`  [selectWinner:${targetArrowDir}] rule[${idx}] cat=${rule.category} arrow=${arrowDir ?? 'none'} → excluded (${reason})`);
           }
         });
 
         if (candidates.length === 0) return null;
 
-        // Return highest-precedence candidate
         candidates.sort((a, b) => b.precedence - a.precedence);
-        return candidates[0];
+        const winner = candidates[0];
+        if (window.DEBUG_RULE_CURVES) {
+          console.log(`  [selectWinner:${targetArrowDir}] → winner: ${winner.rule.category} (arrow=${winner.rule.arrow_direction}, prec=${winner.precedence})`);
+        }
+        return winner;
       }
 
-      async function renderRuleCurves(data) {
+      /**
+       * Return tow zones that apply to a given arrow direction.
+       * Tow zones with no arrow are treated as applying everywhere (unlike parking rules).
+       * @param {Array} towZones
+       * @param {string} targetArrowDir - "left" or "right"
+       * @returns {Array}
+       */
+      function selectApplicableTowZones(towZones, targetArrowDir) {
+        return (towZones || []).filter((tz, idx) => {
+          const arrowDir = tz.arrow_direction;
+          const applies = !arrowDir || arrowDir === "none" || arrowDir === "both" || arrowDir === targetArrowDir;
+          if (window.DEBUG_RULE_CURVES) {
+            console.log(`  [towZone:${targetArrowDir}] tz[${idx}] arrow=${arrowDir ?? 'none'} → ${applies ? 'INCLUDED' : 'excluded'}`);
+          }
+          return applies;
+        });
+      }
+
+      async function renderRuleCurves(data, allWays = null) {
         ruleCurvesLayer.clearLayers();
 
-        // Fetch allWays for visible map area (bounded to current viewport)
-        let renderAllWays = [];
-        try {
-          renderAllWays = await fetchStreets(map.getBounds());
-        } catch (e) {
-          console.warn("renderRuleCurves: failed to fetch streets for map bounds", e);
+        // Use preloaded ways when available (passed from the detection flow).
+        // Fall back to a fresh Overpass fetch only when loading persisted data
+        // cold (e.g. page refresh with stored sign data and no prior detection).
+        let renderAllWays = allWays;
+        let overpassFailed = false;
+        if (!renderAllWays) {
+          try {
+            renderAllWays = await fetchStreets(map.getBounds());
+            console.log(`[renderRuleCurves] Overpass fallback OK: ${renderAllWays.length} ways fetched`);
+          } catch (e) {
+            renderAllWays = [];
+            overpassFailed = true;
+            console.warn("renderRuleCurves: fallback Overpass fetch failed", e);
+            window.DEBUG_RULE_CURVES = true;
+          }
+        } else {
+          console.log(`[renderRuleCurves] Using ${renderAllWays.length} preloaded ways — no Overpass call needed`);
         }
 
         // Collect all signs across all detections for distance-to-next-sign lookup
@@ -1196,58 +1231,77 @@
                   : [];
               intersectionCache.set(signWayGeo, intersectionNodes);
             }
-            if (window.DEBUG_RULE_CURVES) console.log(`[renderRuleCurves] sign=(${sign.lat.toFixed(6)},${sign.lng.toFixed(6)}) wayGeo=${signWayGeo?.length ?? 0} nodes, allWays=${renderAllWays.length}, intersectionNodes=${intersectionNodes.length}`, intersectionNodes);
+            console.log(`[renderRuleCurves] sign=(${sign.lat.toFixed(5)},${sign.lng.toFixed(5)}) wayGeo=${signWayGeo?.length ?? 0} nodes, allWays=${renderAllWays.length}, intersections=${intersectionNodes.length}`);
+            if (window.DEBUG_RULE_CURVES) console.log('  intersection nodes:', intersectionNodes);
+            if (intersectionNodes.length === 0) {
+              console.warn(`[renderRuleCurves] ⚠️  0 intersections — curves will stop at wayGeometry endpoint`);
+            }
             const signLocKey = `${sign.lat.toFixed(SIGN_LOCATION_PRECISION)},${sign.lng.toFixed(SIGN_LOCATION_PRECISION)}`;
 
-            // Select winning rule for each arrow direction (left/right)
-            const leftWinner = selectWinningRuleForArrowDirection(ocrResult.rules, ocrResult.tow_zones, "left");
-            const rightWinner = selectWinningRuleForArrowDirection(ocrResult.rules, ocrResult.tow_zones, "right");
-
-            // Render at most one line per direction
-            [leftWinner, rightWinner].forEach((winner, arrowIdx) => {
-              if (!winner) return;
-
-              const arrowDir = arrowIdx === 0 ? "left" : "right";
-              const curveKey = `${signLocKey}|${arrowDir}`;
-              if (renderedKeys.has(curveKey)) return;
-              renderedKeys.add(curveKey);
-              const directions = arrowToAlongStreetDirections(arrowDir, signContext.side);
-              for (const dir of directions) {
-                const maxDist = findDistanceToNextSign(
-                  signContext,
-                  dir,
-                  allSigns,
-                  signWayGeo,
-                  intersectionNodes,
-                );
-                const latLngs = buildRuleCurveLatLngs(
-                  signContext,
-                  signWayGeo,
-                  dir,
-                  winner.ruleIndex,
-                  maxDist,
-                );
-                if (window.DEBUG_RULE_CURVES) console.log(`[renderRuleCurves] sign=(${sign.lat.toFixed(6)},${sign.lng.toFixed(6)}) side=${signContext.side} arrowDir=${arrowDir} dir=${dir} → maxDist=${maxDist.toFixed(2)}m, curvePoints=${latLngs?.length ?? 0}`);
-                if (!latLngs?.length) continue;
-
-                // Trim curve to map viewport — stop at first point outside bounds
-                const mapBounds = map.getBounds();
-                let trimIdx = latLngs.length;
-                for (let k = 0; k < latLngs.length; k++) {
-                  if (!mapBounds.contains(latLngs[k])) { trimIdx = k; break; }
-                }
-                if (trimIdx === 0) continue;
-                const visibleLatLngs = trimIdx < latLngs.length ? latLngs.slice(0, trimIdx) : latLngs;
-
-                const color = winner.isTowZone ? TOW_ZONE_COLOR : (RULE_CATEGORY_COLORS[winner.rule.category] || "#9ca3af");
-                const polyOpts = { color, weight: 4, opacity: 0.7 };
-                if (winner.isTowZone) polyOpts.dashArray = "8 6";
-
-                L.polyline(visibleLatLngs, polyOpts)
-                  .bindPopup(buildRulePopupHtml(winner.rule, winner.isTowZone))
-                  .addTo(ruleCurvesLayer);
-              }
+            // Log OCR rules so we can debug color selection
+            console.log(`[renderRuleCurves][color] sign=(${sign.lat.toFixed(5)},${sign.lng.toFixed(5)})`, {
+              rules: (ocrResult.rules || []).map((r, i) => `[${i}] ${r.category} arrow=${r.arrow_direction ?? 'none'}`),
+              tow_zones: (ocrResult.tow_zones || []).map((tz, i) => `[${i}] arrow=${tz.arrow_direction ?? 'none'}`),
             });
+
+            // Select winning parking rule for each explicit arrow direction.
+            // No-arrow rules are excluded; tow zones are rendered separately below.
+            const leftWinner = selectWinningRuleForArrowDirection(ocrResult.rules, "left");
+            const rightWinner = selectWinningRuleForArrowDirection(ocrResult.rules, "right");
+
+            console.log(`[renderRuleCurves][color] → leftWinner=${leftWinner ? `${leftWinner.rule.category} [arrow:${leftWinner.rule.arrow_direction}, prec:${leftWinner.precedence}]` : 'null'}, rightWinner=${rightWinner ? `${rightWinner.rule.category} [arrow:${rightWinner.rule.arrow_direction}, prec:${rightWinner.precedence}]` : 'null'}`, { leftColor: leftWinner ? RULE_CATEGORY_COLORS[leftWinner.rule.category] : null, rightColor: rightWinner ? RULE_CATEGORY_COLORS[rightWinner.rule.category] : null });
+
+            // Helper: trim a latLngs array to the current map viewport
+            const trimToViewport = (latLngs) => {
+              const mapBounds = map.getBounds();
+              let i = 0;
+              while (i < latLngs.length && mapBounds.contains(latLngs[i])) i++;
+              return i === 0 ? null : latLngs.slice(0, i);
+            };
+
+            for (const arrowDir of ["left", "right"]) {
+              const winner = arrowDir === "left" ? leftWinner : rightWinner;
+
+              // --- Parking rule curve ---
+              if (winner) {
+                const curveKey = `${signLocKey}|${arrowDir}`;
+                if (!renderedKeys.has(curveKey)) {
+                  renderedKeys.add(curveKey);
+                  const directions = arrowToAlongStreetDirections(arrowDir, signContext.side);
+                  for (const dir of directions) {
+                    const maxDist = findDistanceToNextSign(signContext, dir, allSigns, signWayGeo, intersectionNodes);
+                    const latLngs = buildRuleCurveLatLngs(signContext, signWayGeo, dir, winner.ruleIndex, maxDist);
+                    console.log(`[renderRuleCurves] arrowDir=${arrowDir} dir=${dir} maxDist=${maxDist.toFixed(1)}m pts=${latLngs?.length ?? 0}`);
+                    if (!latLngs?.length) continue;
+                    const visibleLatLngs = trimToViewport(latLngs);
+                    if (!visibleLatLngs) continue;
+                    const color = RULE_CATEGORY_COLORS[winner.rule.category] || "#9ca3af";
+                    L.polyline(visibleLatLngs, { color, weight: 4, opacity: 0.7 })
+                      .bindPopup(buildRulePopupHtml(winner.rule, false))
+                      .addTo(ruleCurvesLayer);
+                  }
+                }
+              }
+
+              // --- Tow zone overlay (always drawn separately, dashed red) ---
+              const applicableTowZones = selectApplicableTowZones(ocrResult.tow_zones, arrowDir);
+              for (const [tzIdx, tz] of applicableTowZones.entries()) {
+                const tzKey = `${signLocKey}|tz|${arrowDir}|${tzIdx}`;
+                if (renderedKeys.has(tzKey)) continue;
+                renderedKeys.add(tzKey);
+                const directions = arrowToAlongStreetDirections(arrowDir, signContext.side);
+                for (const dir of directions) {
+                  const maxDist = findDistanceToNextSign(signContext, dir, allSigns, signWayGeo, intersectionNodes);
+                  const latLngs = buildRuleCurveLatLngs(signContext, signWayGeo, dir, tzIdx, maxDist);
+                  if (!latLngs?.length) continue;
+                  const visibleLatLngs = trimToViewport(latLngs);
+                  if (!visibleLatLngs) continue;
+                  L.polyline(visibleLatLngs, { color: TOW_ZONE_COLOR, weight: 4, opacity: 0.7, dashArray: "8 6" })
+                    .bindPopup(buildRulePopupHtml(tz, true))
+                    .addTo(ruleCurvesLayer);
+                }
+              }
+            }
           }
         }
       }
@@ -1836,7 +1890,7 @@
           }
 
           const updatedStore = appendSignMapDetection(detection);
-          renderSignMapData(updatedStore);
+          renderSignMapData(updatedStore, _lastAllWays);
         });
 
 
@@ -1941,8 +1995,9 @@
               streetName: panoData.location.description || "Unknown street",
             };
 
-            // Fetch road context for better projection
-            await ensureDetectionRoadContext(panoLat, panoLng);
+            // Fetch road context for better projection (single map-bounds call)
+            const allWays = await fetchStreets(map.getBounds()).catch(() => []);
+            await ensureDetectionRoadContext(panoLat, panoLng, allWays);
             initPanoramaForContext();
           } catch (err) {
             console.error("Street View lookup failed:", err);
@@ -1989,6 +2044,8 @@
 
       // Store current detection context
       let currentDetectionContext = null;
+      // Cached allWays from the last detection run; reused by ocr-complete re-render
+      let _lastAllWays = null;
 
       function updateDetectionInfoText() {
         const infoEl = document.getElementById("detectionInfo");
@@ -2063,6 +2120,13 @@
       async function rerunDetection() {
         if (!currentDetectionContext || !detectionPanorama) return;
 
+        // Single Overpass fetch for the entire visible map area.
+        // This is reused by road-context lookup and curve rendering below,
+        // eliminating all additional per-detection Overpass calls.
+        const allWays = await fetchStreets(map.getBounds()).catch(() => []);
+        _lastAllWays = allWays;
+        console.log(`[rerunDetection] fetched ${allWays.length} ways for map bounds`);
+
         // Refresh road context if the panorama has moved to a different location
         const currentPano = detectionPanorama.getPano();
         const pos = detectionPanorama.getPosition?.();
@@ -2085,7 +2149,7 @@
             segmentIndex: null,
             streetName: undefined,
           };
-          await ensureDetectionRoadContext(curLat, curLng);
+          await ensureDetectionRoadContext(curLat, curLng, allWays);
           updateDetectionInfoText();
         }
 
@@ -2108,7 +2172,7 @@
           });
           if (currentDetections.length > 0) {
             try {
-              await plotDetectedSigns();
+              await plotDetectedSigns(allWays);
             } catch (plotErr) {
               console.error("plotDetectedSigns error:", plotErr);
             }
@@ -2124,7 +2188,7 @@
       /**
        * Plot the current panorama point and projected sign locations on the map.
        */
-      async function plotDetectedSigns() {
+      async function plotDetectedSigns(allWays = null) {
         if (currentDetections.length === 0 || !currentDetectionContext) {
           console.warn("plotDetectedSigns: nothing to render");
           return;
@@ -2146,7 +2210,7 @@
           ? detectionPov.heading
           : currentDetectionContext?.heading ?? null;
         const roadContext =
-          (await ensureDetectionRoadContext(cameraLat, cameraLng)) ||
+          (await ensureDetectionRoadContext(cameraLat, cameraLng, allWays)) ||
           currentDetectionContext;
         const signLocations = estimateAllSignLocations(cameraLat, cameraLng, {
           streetBearing: roadContext.streetBearing,
@@ -2187,7 +2251,7 @@
         }
 
         const initialStore = appendSignMapDetection(detectionEntry);
-        await renderSignMapData(initialStore);
+        await renderSignMapData(initialStore, allWays);
 
         hydrateDetectionPreviews(signLocations, detectedPanoId)
           .then(async () => {
@@ -2195,7 +2259,7 @@
               ...detectionEntry,
               signs: signLocations,
             });
-            await renderSignMapData(hydratedStore);
+            await renderSignMapData(hydratedStore, allWays);
           })
           .catch((previewErr) => {
             console.warn("Sign preview hydration failed:", previewErr);
