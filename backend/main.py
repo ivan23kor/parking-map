@@ -528,10 +528,26 @@ async def fetch_zoomed_sign_image(
         return None
 
 
+try:
+    from backend.streets_db import query_streets as _query_streets
+except ImportError:
+    from streets_db import query_streets as _query_streets
+
+
 @app.get("/health")
 async def health():
     """Health check endpoint."""
     return {"status": "ok", "model": str(MODEL_PATH.name)}
+
+
+@app.get("/streets")
+async def get_streets(south: float, west: float, north: float, east: float):
+    """Query local OSM streets within bounding box."""
+    try:
+        ways = _query_streets(south, west, north, east)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return ways
 
 
 DUMP_PATH = Path("/tmp/parksight-dump.json")

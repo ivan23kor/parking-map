@@ -7,6 +7,12 @@ cd "$ROOT_DIR"
 
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 
+STREETS_DB="$ROOT_DIR/backend/data/streets.db"
+if [ ! -f "$STREETS_DB" ]; then
+  echo "WARNING: $STREETS_DB not found. Street queries will fail."
+  echo "Run: python backend/ingest_osm.py <file.osm.pbf>"
+fi
+
 if ! command -v python3 >/dev/null 2>&1; then
   echo "python3 is required to start the backend."
   exit 1

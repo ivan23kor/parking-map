@@ -1,74 +1,22 @@
 /**
  * Street data fetching and sampling utilities.
- * Uses Overpass API for OSM data and Turf.js for geometry calculations.
+ * Uses local OSM database served from backend.
  */
 
 /**
- * Fetch streets from Overpass API within given bounds.
+ * Fetch streets from local backend within given bounds.
  * @param {L.LatLngBounds} bounds - Leaflet bounds object
  * @returns {Promise<Array>} Array of way objects with geometry and tags
  */
 async function fetchStreets(bounds) {
-    const overpassQuery = `
-        [out:json][timeout:15];
-        (
-            way["highway"~"^(primary|secondary|tertiary|residential|unclassified)$"](${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()});
-        );
-        out geom qt;
-    `;
-
-    let lastError;
-    for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-            const response = await fetch('https://overpass-api.de/api/interpreter', {
-                method: 'POST',
-                body: overpassQuery
-            });
-
-            if (!response.ok) {
-                if (response.status === 429) {
-                    // Rate limited: stop immediately, do NOT retry.
-                    // Every retry during the rate-limit window burns quota and
-                    // delays the next successful call. The burst test shows
-                    // ~4 requests are allowed before 429 kicks in.
-                    lastError = new Error(`Overpass API error: ${response.status}`);
-                    break;
-                }
-                if (response.status === 504 && attempt < 2) {
-                    const delay = Math.pow(2, attempt) * 1000;
-                    await new Promise(r => setTimeout(r, delay));
-                    continue;
-                }
-                lastError = new Error(`Overpass API error: ${response.status}`);
-                break;
-            }
-
-            const data = await response.json();
-
-            // Extract ways with geometry
-            const ways = [];
-            if (data.elements) {
-                for (const element of data.elements) {
-                    if (element.type === 'way' && element.geometry && element.geometry.length >= 2) {
-                        ways.push({
-                            id: element.id,
-                            geometry: element.geometry,
-                            tags: element.tags || {}
-                        });
-                    }
-                }
-            }
-
-            return ways;
-
-        } catch (err) {
-            // Network-level error (no response): retry up to 3 times
-            lastError = err;
-            if (attempt < 2) continue;
-        }
+    const apiUrl = window.DETECTION_CONFIG?.API_URL;
+    const response = await fetch(
+        `${apiUrl}/streets?south=${bounds.getSouth()}&west=${bounds.getWest()}&north=${bounds.getNorth()}&east=${bounds.getEast()}`
+    );
+    if (!response.ok) {
+        throw new Error(`Streets API error: ${response.status}`);
     }
-
-    throw lastError;
+    return response.json();
 }
 
 /**
@@ -130,7 +78,7 @@ function sampleStreetPoints(way, intervalMeters = 50) {
 }
 
 /**
- * Convert Overpass data to GeoJSON for map display.
+ * Convert street data to GeoJSON for map display.
  * @param {Array} ways - Array of way objects
  * @returns {Object} GeoJSON FeatureCollection
  */

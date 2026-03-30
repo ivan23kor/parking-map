@@ -10,6 +10,12 @@ WEB_PORT="${WEB_PORT:-8080}"
 LOG_DIR="${ROOT_DIR}/logs"
 mkdir -p "$LOG_DIR"
 
+STREETS_DB="$ROOT_DIR/backend/data/streets.db"
+if [ ! -f "$STREETS_DB" ]; then
+  echo "WARNING: $STREETS_DB not found. Street queries will fail."
+  echo "Run: python backend/ingest_osm.py <file.osm.pbf>"
+fi
+
 if ! command -v bun >/dev/null 2>&1; then
   echo "bun is required to start the stack."
   exit 1
