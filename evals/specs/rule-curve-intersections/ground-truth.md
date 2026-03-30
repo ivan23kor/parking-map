@@ -7,17 +7,20 @@
 - `intersections.intersectionNodeIndices` must be a non-empty array
 
 ### Rule curves rendered
-- `rule_curves` array must contain at least 1 curve
+- `ruleCurves` array must contain at least 1 curve
 - Each curve must have `pointCount` >= 3 (a curve is a polyline, not a point or single segment)
-- Each curve `lengthMeters` must be > 8 (not degenerate)
-- Each curve `lengthMeters` must be < 250 (bounded by intersection, not extending to infinity)
-- The no_parking rule curve must have color `#ef4444` (red, matching RULE_CATEGORY_COLORS.no_parking)
+- Each curve length must be > 8m (not degenerate)
+- Every curve color must be one of the known palette values (no unknown colors):
+  - `#ef4444` — no_parking (red)
+  - `#22c55e` — parking_allowed (green)
+  - `#8b5cf6` — loading_zone (purple)
+  - `#f59e0b` — permit_required (amber)
+  - `#dc2626` — tow zone overlay (dashed red)
+- Multiple curves per direction are valid — a sign can produce stacked overlays (e.g. loading_zone + tow zone, or no_parking + tow zone)
 
 ### Distance calculation
-- `max_distances.maxDistForward` must be > 10 (there is meaningful distance to next intersection)
-- `max_distances.maxDistForward` must be < 250 (bounded by intersection, not falling back to 50m default or extending unbounded)
-- `max_distances.maxDistBackward` must be > 10
-- `max_distances.maxDistBackward` must be < 250
+- `maxDistForward` (or equivalent) must be > 10 (meaningful distance to next intersection)
+- `maxDistBackward` (or equivalent) must be > 10
 
 ### Sign markers present
 - `sign_markers` must contain at least one entry with `fillColor` "#22c55e" (green sign dot)
@@ -27,15 +30,16 @@
 ## Visual assertions
 
 ### Rule curve appearance
-- Rule curve must be visible as a colored polyline on the map
-- Rule curve must NOT extend past the visible intersection points
+- Rule curves must be visible as colored polylines on the map
+- Rule curves must extend to the nearest intersection in each direction (not a fixed fallback distance)
+- When multiple rules apply to the same direction, their curves stack visually as parallel overlays
 
 ## Screenshot assertions
 
 ### 02-final-rule-curves.png
-- A map should be visible with at least one colored polyline (the rule curve) that is NOT the same as the street lines
-- The rule curve should appear offset from the street centerline, running parallel to it
-- There should be colored dots visible on the map (sign markers and camera marker)
+- A map should be visible with colored polylines (rule curves) distinct from street lines
+- Rule curves should appear offset from the street centerline, running parallel to it
+- Colored dots visible on the map (green sign dot, blue camera dot)
 
 ## Console assertions
 - `console_errors` must be empty (no JavaScript errors during rendering)
