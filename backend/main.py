@@ -464,7 +464,6 @@ def pixel_to_angular_offset(x: float, y: float, h_fov: float,
 
 
 async def fetch_zoomed_sign_image(
-    client: httpx.AsyncClient,
     sv_params: dict,
     det_x1: float, det_y1: float, det_x2: float, det_y2: float,
     img_width: int, img_height: int,
@@ -521,7 +520,7 @@ async def fetch_zoomed_sign_image(
     )
     
     try:
-        resp = await client.get(zoom_url, timeout=10.0)
+        resp = await httpx_client.get(zoom_url, timeout=10.0)
         resp.raise_for_status()
         return resp.content
     except httpx.HTTPError as e:
@@ -553,24 +552,23 @@ async def crop_sign_tiles(request: CropSignTilesRequest):
     Fetch Street View tiles at max zoom, stitch if needed, crop sign region.
     This gives much higher resolution than the Static API.
     """
-    client = httpx_client
     # Fetch all required tiles
     tile_images = {}
-        for tile in request.tiles:
-            url = (
-                f"https://tile.googleapis.com/v1/streetview/tiles/5/{tile['x']}/{tile['y']}"
-                f"?session={request.session_token}&key={request.api_key}&panoId={request.pano_id}"
-            )
-            try:
-                resp = await client.get(url, timeout=10.0)
-                resp.raise_for_status()
-                tile_img = Image.open(io.BytesIO(resp.content))
-                # Resize if tile size doesn't match expected
-                if tile_img.size != (TILE_SIZE, TILE_SIZE):
-                    tile_img = tile_img.resize((TILE_SIZE, TILE_SIZE), Image.Resampling.LANCZOS)
-                tile_images[(tile['x'], tile['y'])] = tile_img
-            except httpx.HTTPError as e:
-                raise HTTPException(status_code=400, detail=f"Failed to fetch tile {tile}: {e}")
+    for tile in request.tiles:
+        url = (
+            f"https://tile.googleapis.com/v1/streetview/tiles/5/{tile['x']}/{tile['y']}"
+            f"?session={request.session_token}&key={request.api_key}&panoId={request.pano_id}"
+        )
+        try:
+            resp = await httpx_client.get(url, timeout=10.0)
+            resp.raise_for_status()
+            tile_img = Image.open(io.BytesIO(resp.content))
+            # Resize if tile size doesn't match expected
+            if tile_img.size != (TILE_SIZE, TILE_SIZE):
+                tile_img = tile_img.resize((TILE_SIZE, TILE_SIZE), Image.Resampling.LANCZOS)
+            tile_images[(tile['x'], tile['y'])] = tile_img
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=400, detail=f"Failed to fetch tile {tile}: {e}")
     
     # Calculate stitched image size
     num_tiles_x = max(t['x'] for t in request.tiles) - request.tile_x1 + 1
@@ -971,22 +969,21 @@ async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
 
     # Fetch all slice images in parallel
     t_fetch_start = time.time()
-    async def fetch_slice(client: httpx.AsyncClient, heading: float) -> tuple[float, bytes | None]:
+    async def fetch_slice(heading: float) -> tuple[float, bytes | None]:
         url = build_streetview_url(
             request.pano_id, heading, request.pitch, slice_fov,
             request.img_width, request.img_height, request.api_key
         )
         try:
-            resp = await client.get(url, timeout=10.0)
+            resp = await httpx_client.get(url, timeout=10.0)
             resp.raise_for_status()
             return heading, resp.content
         except httpx.HTTPError as e:
             print(f"Panorama detect: failed to fetch slice at heading {heading:.1f}°: {e}")
             return heading, None
 
-    async with httpx.AsyncClient() as client:
-        tasks = [fetch_slice(client, h) for h in slices]
-        results = await asyncio.gather(*tasks)
+    tasks = [fetch_slice(h) for h in slices]
+    results = await asyncio.gather(*tasks)
     t_fetch = (time.time() - t_fetch_start) * 1000
 
     # Run inference on each slice and collect angular detections
@@ -1161,10 +1158,9 @@ async def detect_single_pano_impl(request: SinglePanoRequest) -> SahiResponse:
         request.pano_id, request.heading, request.pitch, request.fov,
         request.img_width, request.img_height, request.api_key
     )
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, timeout=10.0)
-        resp.raise_for_status()
-        image_bytes = resp.content
+    resp = await httpx_client.get(url, timeout=10.0)
+    resp.raise_for_status()
+    image_bytes = resp.content
     t_fetch = (time.time() - t_fetch_start) * 1000
 
     image = Image.open(io.BytesIO(image_bytes))
@@ -1385,37 +1381,36 @@ async def ocr_sign(request: OcrSignRequest):
     data_url = f"data:{mime};base64,{request.image_base64}"
 
     max_retries = 3
-    async with httpx.AsyncClient() as client:
-        for attempt in range(max_retries):
-            try:
-                resp = await client.post(
-                    f"{cli_proxy_url}/v1/chat/completions",
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {cli_proxy_api_key}"
-                    },
-                    json={
-                        "model": cli_proxy_model,
-                        "messages": [{
-                            "role": "user",
-                            "content": [
-                                {"type": "image_url", "image_url": {"url": data_url}},
-                                {"type": "text", "text": OCR_PROMPT}
-                            ]
-                        }],
-                        "max_tokens": 4096
-                    },
-                    timeout=60.0
-                )
-                resp.raise_for_status()
-                break
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 429 and attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)
-                    continue
-                raise HTTPException(status_code=502, detail=f"OCR API error: {e.response.status_code} {e.response.reason_phrase}")
-            except httpx.HTTPError as e:
-                raise HTTPException(status_code=502, detail=f"OCR API error: {e}")
+    for attempt in range(max_retries):
+        try:
+            resp = await httpx_client.post(
+                f"{cli_proxy_url}/v1/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {cli_proxy_api_key}"
+                },
+                json={
+                    "model": cli_proxy_model,
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                            {"type": "text", "text": OCR_PROMPT}
+                        ]
+                    }],
+                    "max_tokens": 4096
+                },
+                timeout=60.0
+            )
+            resp.raise_for_status()
+            break
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429 and attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            raise HTTPException(status_code=502, detail=f"OCR API error: {e.response.status_code} {e.response.reason_phrase}")
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"OCR API error: {e}")
 
     inference_time_ms = (time.time() - start_time) * 1000
 
