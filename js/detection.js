@@ -1811,66 +1811,61 @@ async function runOcrOnAllDetections() {
   if (!panoId) return;
 
   const statusEl = document.getElementById("status") || document.getElementById("detectionStatus");
-  if (statusEl) statusEl.textContent = `Running OCR on sign cluster...`;
+  if (statusEl) statusEl.textContent = `Running OCR on ${currentDetections.length} sign cluster(s)...`;
 
-  try {
-    // Merge all detections into one bounding box covering the full sign post
-    const mergedDet = mergeAngularDetections(currentDetections);
+  // Run OCR independently on each detection cluster (in parallel).
+  // Merging all clusters into one crop fails when they are on separate sign poles.
+  await Promise.allSettled(currentDetections.map(async (det, i) => {
+    try {
+      const cropPlan = await buildDetectionCropPlan(det, panoId, null);
 
-    const cropPlan = await buildDetectionCropPlan(mergedDet, panoId, null);
+      const cropResp = await fetch(`${apiUrl}/crop-sign-tiles`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...cropPlan.requestBody, include_image: true, save: false }),
+      });
 
-    const cropResp = await fetch(`${apiUrl}/crop-sign-tiles`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...cropPlan.requestBody, include_image: true, save: false }),
-    });
+      if (!cropResp.ok) {
+        console.warn(`OCR [${i}]: failed to crop sign cluster`);
+        throw new Error("Failed to crop sign cluster");
+      }
 
-    if (!cropResp.ok) {
-      console.warn("OCR: failed to crop sign cluster");
-      throw new Error("Failed to crop sign cluster");
-    }
+      const cropData = await cropResp.json();
+      if (!cropData.image_base64) {
+        console.warn(`OCR [${i}]: no image for sign cluster`);
+        throw new Error("No image returned for sign cluster");
+      }
 
-    const cropData = await cropResp.json();
-    if (!cropData.image_base64) {
-      console.warn("OCR: no image for sign cluster");
-      throw new Error("No image returned for sign cluster");
-    }
+      const ocrResp = await fetch(`${apiUrl}/ocr-sign`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image_base64: cropData.image_base64 }),
+      });
 
-    const ocrResp = await fetch(`${apiUrl}/ocr-sign`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image_base64: cropData.image_base64 }),
-    });
+      if (!ocrResp.ok) {
+        console.warn(`OCR [${i}]: request failed`);
+        throw new Error("OCR request failed");
+      }
 
-    if (!ocrResp.ok) {
-      console.warn("OCR: failed for sign cluster");
-      throw new Error("OCR request failed");
-    }
-
-    const ocrResult = await ocrResp.json();
-    console.log("OCR cluster result:", ocrResult);
-
-    // Store same result on all detections so any bbox click shows it
-    currentDetections.forEach((det, i) => {
+      const ocrResult = await ocrResp.json();
+      console.log(`OCR cluster result [${i}]:`, ocrResult);
       ocrResults.set(i, ocrResult);
       det.ocrResult = ocrResult;
-    });
-  } catch (err) {
-    console.warn("OCR error:", err);
-    const errorMsg = `OCR failed: ${err.message}`;
-    currentDetections.forEach((det, i) => {
+    } catch (err) {
+      console.warn(`OCR error [${i}]:`, err);
+      const errorMsg = `OCR failed: ${err.message}`;
       det.ocrResult = { is_parking_sign: false, rejection_reason: errorMsg };
       det.ocrError = errorMsg;
       ocrResults.set(i, det.ocrResult);
-    });
-  }
+    }
+  }));
 
   updateDetectionOverlay();
   window.dispatchEvent(new Event("ocr-complete"));
 
   if (statusEl) {
-    const ocrCount = ocrResults.size;
-    statusEl.textContent = `Found ${currentDetections.length} sign(s). OCR: ${ocrCount > 0 ? "done" : "failed"}.`;
+    const positiveCount = [...ocrResults.values()].filter(r => r.is_parking_sign).length;
+    statusEl.textContent = `Found ${currentDetections.length} sign(s). OCR: ${positiveCount > 0 ? `${positiveCount} parking sign(s) identified` : "done"}.`;
   }
 }
 
