@@ -2245,6 +2245,22 @@
         });
         const detectedPanoId =
           detectionPanorama?.getPano?.() || roadContext.panoId;
+
+        // Carry forward positive OCR results from a previous detection at the same panoId.
+        // Keeps curves visible during the latency window while new OCR runs.
+        const _existingDet = getLatestSignMapData().detections.find(d => d.panoId === detectedPanoId);
+        if (_existingDet?.signs?.length) {
+          for (const s of signLocations) {
+            let best = null, minD = Infinity;
+            for (const ps of _existingDet.signs) {
+              if (!ps.ocrResult?.is_parking_sign) continue;
+              const d = Math.abs(signedAngleDeltaDegrees(ps.heading, s.heading));
+              if (d < minD) { minD = d; best = ps; }
+            }
+            if (best && minD < 20) s.ocrResult = best.ocrResult;
+          }
+        }
+
         const detectionEntry = {
           savedAt: Date.now(),
           source: "parksight",
