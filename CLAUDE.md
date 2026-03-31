@@ -93,6 +93,8 @@ FastAPI YOLO11 inference service.
 
 **Model:** YOLO11m, 1 class (`parking_sign`). Download from Kaggle → `backend/models/best.pt`
 
+**Streets DB:** `backend/data/streets.db` — OSM streets SQLite database (~174 MB). Not in git (exceeds 100 MB limit). Rebuild locally: `python3 backend/ingest_osm.py path/to/region-latest.osm.pbf`
+
 **Detected signs:** Saved to `detected_signs/`, served at `/detected-signs/`
 
 ### ML Training (`datasets/`, `notebooks/`)

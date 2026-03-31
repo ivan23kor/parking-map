@@ -50,3 +50,6 @@ evals/runs/
 
 # Benchmark crops and results
 benchmark/
+
+# OSM streets database (>100MB, download separately)
+backend/data/streets.db
