@@ -1176,10 +1176,12 @@
         }
 
         // Collect all signs across all detections for distance-to-next-sign lookup
+        // Exclude OCR-rejected signs — they have no dot and shouldn't break curves
         const allSigns = [];
         for (const detection of data?.detections || []) {
           const wayGeo = detection.wayGeometry;
           for (const sign of detection.signs || []) {
+            if (sign.ocrResult && sign.ocrResult.is_parking_sign === false) continue;
             allSigns.push({
               ...sign,
               wayGeometry: wayGeo || sign.wayGeometry,
