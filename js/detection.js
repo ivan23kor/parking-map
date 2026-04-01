@@ -1444,7 +1444,7 @@ function clearDetections() {
 }
 
 /**
- * Run single-pano detection (no SAHI slicing).
+ * Run detection on a single panorama view.
  */
 async function runSinglePanoApiDetection(panoId, heading, pitch, fov, statusEl) {
   const apiUrl = window.DETECTION_CONFIG?.API_URL;
@@ -1456,7 +1456,7 @@ async function runSinglePanoApiDetection(panoId, heading, pitch, fov, statusEl) 
   const conf = window.DETECTION_CONFIG?.CONFIDENCE_THRESHOLD ?? 0.15;
 
   if (statusEl)
-    statusEl.textContent = "Detecting parking signs (single pano)...";
+    statusEl.textContent = "Detecting parking signs...";
 
   let resp;
   try {
@@ -1487,97 +1487,15 @@ async function runSinglePanoApiDetection(panoId, heading, pitch, fov, statusEl) 
   return resp.json();
 }
 
-/**
- * Run the backend's panorama detection pipeline.
- * The backend may use multi-slice inference internally.
- */
-async function runPanoramaDetection(panoId, heading, pitch, fov, statusEl) {
-  const apiUrl = window.DETECTION_CONFIG?.API_URL;
-  const apiKey = window.GOOGLE_CONFIG?.API_KEY;
-  if (!apiUrl || !apiKey) {
-    throw new Error("Detection API or Google API key not configured");
-  }
-
-  const conf = window.DETECTION_CONFIG?.CONFIDENCE_THRESHOLD ?? 0.15;
-
-  // Use half the current FOV as slice size for ~2x resolution boost
-  const sliceFov = Math.min(45, fov / 2);
-
-  if (statusEl)
-    statusEl.textContent = `Detecting parking signs across ${sliceFov.toFixed(0)}° slices...`;
-
-  let resp;
-  try {
-    resp = await fetch(`${apiUrl}/detect-panorama`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        pano_id: panoId,
-        heading: heading,
-        pitch: pitch,
-        fov: fov,
-        slice_fov: sliceFov,
-        overlap: 0.3,
-        confidence: conf,
-        nms_iou_threshold: 0.5,
-        api_key: apiKey,
-        img_width: 640,
-        img_height: 640,
-        sign_panel_height_m: PARKING_SIGN_FACE_HEIGHT_METERS,
-      }),
-    });
-  } catch (err) {
-    console.error("Panorama detection request failed:", err);
-    throw new Error(`Can't reach detection API. Make sure backend is running.`);
-  }
-
-  if (!resp.ok) {
-    const errorText = await resp.text();
-    throw new Error(`Panorama detection failed: ${resp.status} - ${errorText}`);
-  }
-
-  return resp.json();
-}
-
-async function runSingleViewPanoramaDetection(
-  panoId,
-  heading,
-  pitch,
-  fov,
-  imgWidth,
-  imgHeight,
-) {
-  const imageUrl = getStreetViewImageUrl(
-    panoId,
-    heading,
-    pitch,
-    fov,
-    imgWidth,
-    imgHeight,
-  );
-  const result = await runDetection(imageUrl);
-
-  return {
-    detections: clusterAngularDetections(
-      result.detections.map((det) =>
-        detectionToAngular(det, heading, pitch, fov, imgWidth, imgHeight),
-      ),
-    ),
-    total_inference_time_ms: result.inference_time_ms,
-    slices_count: 1,
-  };
-}
 
 /**
  * Run detection and display results on panorama.
- * @param {"single"|"sahi"} mode - "single" for single-pano, "sahi" for multi-slice SAHI
  */
 async function runDetectionOnPanorama(
   panoId,
   heading,
   statusEl,
   useCurrentPov = false,
-  mode = "sahi",
 ) {
   let fov = 90;
   let pitch = PANORAMA_DEFAULTS.pitch;
@@ -1598,20 +1516,9 @@ async function runDetectionOnPanorama(
   }
 
   try {
-    let result;
-    let detectionMode;
-
-    if (mode === "single") {
-      result = await runSinglePanoApiDetection(
-        detectPanoId, detectHeading, pitch, fov, statusEl,
-      );
-      detectionMode = "single-pano";
-    } else {
-      result = await runPanoramaDetection(
-        detectPanoId, detectHeading, pitch, fov, statusEl,
-      );
-      detectionMode = "multi-slice";
-    }
+    const result = await runSinglePanoApiDetection(
+      detectPanoId, detectHeading, pitch, fov, statusEl,
+    );
 
     currentDetections = clusterAngularDetections(
       result.detections.map((det) => ({
@@ -1636,16 +1543,12 @@ async function runDetectionOnPanorama(
 
     const count = currentDetections.length;
     const timeMs = result.total_inference_time_ms;
-    const modeSummary =
-      detectionMode === "multi-slice"
-        ? `${result.slices_count} slices`
-        : "single pano";
 
     // Run OCR on all detections (async, non-blocking)
     if (count > 0) {
       runOcrOnAllDetections();
     } else if (statusEl) {
-      statusEl.textContent = `No parking signs detected (${modeSummary}, ${timeMs.toFixed(0)}ms)`;
+      statusEl.textContent = `No parking signs detected (${timeMs.toFixed(0)}ms)`;
     }
 
     return result;

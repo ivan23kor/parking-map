@@ -86,7 +86,7 @@ FastAPI YOLO11 inference service.
 **Endpoints:**
 - `GET /health` — Health check
 - `POST /detect` — Single image detection
-- `POST /detect-panorama` — Multi-slice panorama detection
+- `POST /detect-single-pano` — Panorama detection (single image)
 - `POST /crop-sign-tiles` — Fetch/stitch/crop Street View tiles
 - `POST /preview-sign` — Sign-centered Street View
 - `GET /detect-debug` — Image with bounding boxes

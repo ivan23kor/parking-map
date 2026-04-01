@@ -195,10 +195,6 @@ async function mockInfrastructure(page, options = {}) {
   await page.route("https://tile.googleapis.com/v1/streetview/metadata?**", (r) => r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ heading: 45, tilt: 90, roll: 0, imageWidth: 16384, imageHeight: 8192 }) }));
   await page.route("https://overpass-api.de/api/interpreter", (r) => r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ elements: fixtureWays }) }));
 
-  await page.route("http://127.0.0.1:8000/detect-panorama", async (r) => {
-    const resp = typeof detectPanoramaResponse === "function" ? detectPanoramaResponse(r.request()) : detectPanoramaResponse;
-    await r.fulfill({ status: resp.status, contentType: resp.contentType || "application/json", body: resp.body });
-  });
   await page.route("http://127.0.0.1:8000/detect-single-pano", async (r) => {
     const resp = typeof detectPanoramaResponse === "function" ? detectPanoramaResponse(r.request()) : detectPanoramaResponse;
     await r.fulfill({ status: resp.status, contentType: resp.contentType || "application/json", body: resp.body });
@@ -373,7 +369,7 @@ test.describe("detection flow (real OSM data)", () => {
       showDetectionForIndex(0);
     }, { segStart: VASSAR_SEG_START, segEnd: VASSAR_SEG_END });
 
-    await page.locator("#detectSingleBtn").click();
+    await page.locator("#detectBtn").click();
     await expect(page.locator("#detectionStatus")).toContainText("Found 2 sign(s)", { timeout: 10000 });
 
     const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("parksight_latest_sign_map_data")));
@@ -397,7 +393,7 @@ test.describe("detection flow (real OSM data)", () => {
       showDetectionForIndex(0);
     }, { segStart: VASSAR_SEG_START, segEnd: VASSAR_SEG_END });
 
-    await page.locator("#detectSingleBtn").click();
+    await page.locator("#detectBtn").click();
     await expect(page.locator("#detectionStatus")).toContainText("Found 2 sign(s)", { timeout: 10000 });
 
     const roadMarkers = await page.evaluate(() =>
@@ -426,7 +422,7 @@ test.describe("detection flow (real OSM data)", () => {
       });
     }, { vassarGeo: VASSAR_WAY.geometry, segStart: VASSAR_SEG_START, segEnd: VASSAR_SEG_END, allWays: fixtureWays });
 
-    await page.locator("#detectSingleBtn").click();
+    await page.locator("#detectBtn").click();
     await expect(page.locator("#detectionStatus")).toContainText("Found 2 sign(s)", { timeout: 10000 });
 
     const roadMarkers = await page.evaluate(() =>
@@ -534,7 +530,7 @@ test.describe("detection flow (real OSM data)", () => {
       showDetectionForIndex(0);
     }, { vassarGeo: VASSAR_WAY.geometry, segStart: VASSAR_SEG_START, segEnd: VASSAR_SEG_END, allWays: fixtureWays });
 
-    await page.locator("#detectSahiBtn").click();
+    await page.locator("#detectBtn").click();
     await expect(page.locator("#detectionStatus")).toContainText("Found 2 sign(s)", { timeout: 10000 });
 
     const projection = await page.evaluate(() => JSON.parse(localStorage.getItem("parksight_latest_sign_map_data")));

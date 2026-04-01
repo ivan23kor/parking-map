@@ -375,8 +375,7 @@
         <svg id="detectionOverlay"></svg>
         <div id="detectionStatus"></div>
         <div id="detectionButtons">
-          <button id="detectSingleBtn">Detect (single)</button>
-          <button id="detectSahiBtn">Detect (SAHI)</button>
+          <button id="detectBtn">Detect</button>
         </div>
         <div id="detectionInfo"></div>
       </section>
@@ -1669,7 +1668,7 @@
             PREVIEW_REFINEMENT_FOV_MIN,
             PREVIEW_REFINEMENT_FOV_MAX,
           );
-          const result = await runPanoramaDetection(
+          const result = await runSinglePanoApiDetection(
             previewView.panoId,
             targetDetection.heading,
             targetDetection.pitch,
@@ -1852,12 +1851,12 @@
         }
 
         // Initialize Leaflet map
-        map = L.map("map", { maxZoom: 19, minZoom: 2 }).setView([42.3615, -71.0921], 16);
+        map = L.map("map", { maxZoom: 20, minZoom: 2 }).setView([42.3615, -71.0921], 16);
 
         // Add tile layer (OpenStreetMap with street names)
         L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
           attribution: "© OpenStreetMap contributors",
-          maxZoom: 19,
+          maxZoom: 20,
         }).addTo(map);
 
         // Initialize layers
@@ -1967,11 +1966,8 @@
 
         // Detection pane controls
         document
-          .getElementById("detectSingleBtn")
-          .addEventListener("click", () => rerunDetection("single"));
-        document
-          .getElementById("detectSahiBtn")
-          .addEventListener("click", () => rerunDetection("sahi"));
+          .getElementById("detectBtn")
+          .addEventListener("click", () => rerunDetection());
         document
           .getElementById("clearProjectedSignsBtn")
           .addEventListener("click", clearProjectedSigns);
@@ -2138,13 +2134,11 @@
       /**
        * Re-run detection at current panorama POV (visible area only).
        */
-      async function rerunDetection(mode = "sahi") {
+      async function rerunDetection() {
         if (!currentDetectionContext || !detectionPanorama) return;
 
-        const singleBtn = document.getElementById("detectSingleBtn");
-        const sahiBtn = document.getElementById("detectSahiBtn");
-        singleBtn.disabled = true;
-        sahiBtn.disabled = true;
+        const detectBtn = document.getElementById("detectBtn");
+        detectBtn.disabled = true;
 
         // Single Overpass fetch for the entire visible map area.
         // This is reused by road-context lookup and curve rendering below,
@@ -2184,7 +2178,7 @@
 
         try {
           // Use current POV (heading, pitch, zoom/FOV) for detection
-          await runDetectionOnPanorama(panoId, null, statusEl, true, mode);
+          await runDetectionOnPanorama(panoId, null, statusEl, true);
 
           // Project detected signs onto the map
           console.log(
@@ -2209,8 +2203,7 @@
           console.error("Re-detection failed:", err);
           statusEl.textContent = "Detection failed.";
         } finally {
-          singleBtn.disabled = false;
-          sahiBtn.disabled = false;
+          detectBtn.disabled = false;
         }
       }
 

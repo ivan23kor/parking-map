@@ -280,22 +280,7 @@ class SinglePanoRequest(BaseModel):
     img_height: int = 640
 
 
-class SahiRequest(BaseModel):
-    pano_id: str
-    heading: float
-    pitch: float = 0.0
-    fov: float = 90.0
-    slice_fov: float = 45.0
-    overlap: float = 0.3
-    confidence: float = 0.15
-    nms_iou_threshold: float = 0.5
-    api_key: str
-    img_width: int = 640
-    img_height: int = 640
-    sign_panel_height_m: float = 0.45
-
-
-class SahiResponse(BaseModel):
+class DetectionPanoResponse(BaseModel):
     detections: list[AngularDetection]
     total_inference_time_ms: float
     slices_count: int
@@ -342,65 +327,6 @@ def pixel_to_angular(x: float, y: float, pov_heading: float, pov_pitch: float,
     world_pitch = math.degrees(math.asin(max(-1.0, min(1.0, pz / r))))
 
     return world_heading, world_pitch
-
-
-def angular_iou(a: AngularDetection, b: AngularDetection) -> float:
-    """Compute IoU between two detections in angular (heading x pitch) space."""
-    # Box edges
-    a_left = a.heading - a.angular_width / 2
-    a_right = a.heading + a.angular_width / 2
-    a_top = a.pitch + a.angular_height / 2
-    a_bottom = a.pitch - a.angular_height / 2
-
-    b_left = b.heading - b.angular_width / 2
-    b_right = b.heading + b.angular_width / 2
-    b_top = b.pitch + b.angular_height / 2
-    b_bottom = b.pitch - b.angular_height / 2
-
-    # Handle heading wrap-around: shift b relative to a
-    heading_diff = b.heading - a.heading
-    if heading_diff > 180:
-        heading_diff -= 360
-    elif heading_diff < -180:
-        heading_diff += 360
-    # Re-center b on a's frame
-    b_left_adj = a.heading + heading_diff - b.angular_width / 2
-    b_right_adj = a.heading + heading_diff + b.angular_width / 2
-
-    inter_left = max(a_left, b_left_adj)
-    inter_right = min(a_right, b_right_adj)
-    inter_bottom = max(a_bottom, b_bottom)
-    inter_top = min(a_top, b_top)
-
-    inter_w = max(0, inter_right - inter_left)
-    inter_h = max(0, inter_top - inter_bottom)
-    inter_area = inter_w * inter_h
-
-    a_area = a.angular_width * a.angular_height
-    b_area = b.angular_width * b.angular_height
-    union_area = a_area + b_area - inter_area
-
-    if union_area <= 0:
-        return 0.0
-    return inter_area / union_area
-
-
-def nms_angular(detections: list[AngularDetection], iou_threshold: float = 0.5) -> list[AngularDetection]:
-    """Non-Maximum Suppression in angular space. Keeps depth from highest confidence detection."""
-    if not detections:
-        return []
-    # Sort by confidence descending
-    sorted_dets = sorted(detections, key=lambda d: d.confidence, reverse=True)
-    keep = []
-    for det in sorted_dets:
-        suppressed = False
-        for kept in keep:
-            if angular_iou(det, kept) > iou_threshold:
-                suppressed = True
-                break
-        if not suppressed:
-            keep.append(det)
-    return keep
 
 
 def parse_streetview_url(url: str) -> dict | None:
@@ -956,215 +882,7 @@ async def detect_file(file: UploadFile = File(...), confidence: float = 0.15):
     )
 
 
-async def detect_panorama_impl(request: SahiRequest) -> SahiResponse:
-    """
-    Panorama detection using two overlapping higher-zoom windows (2-image SAHL).
-
-    Slices the panorama view into exactly 2 overlapping windows,
-    runs YOLO on each, converts detections to angular coordinates,
-    and merges with NMS.
-    """
-    t_start_total = time.time()
-
-    # Two-image SAHL: calculate required slice FOV to cover requested FOV with overlap
-    num_slices = 2
-    slice_fov = request.fov / (2 - request.overlap)
-
-    # Calculate slice headings (centered around requested heading)
-    # Each slice is offset by half of (slice_fov - overlap_region)
-    step = slice_fov * (1 - request.overlap)
-    start_heading = request.heading - step / 2
-
-    slices = []
-    for i in range(num_slices):
-        slice_heading = (start_heading + i * step) % 360
-        slices.append(slice_heading)
-
-    print(f"Panorama detect: {num_slices} slices, FOV={slice_fov:.1f}°, "
-          f"step={step:.1f}°, headings={[f'{h:.1f}' for h in slices]}")
-
-    # Fetch all slice images in parallel
-    t_fetch_start = time.time()
-    async def fetch_slice(heading: float) -> tuple[float, bytes | None]:
-        url = build_streetview_url(
-            request.pano_id, heading, request.pitch, slice_fov,
-            request.img_width, request.img_height, request.api_key
-        )
-        try:
-            resp = await httpx_client.get(url, timeout=10.0)
-            resp.raise_for_status()
-            return heading, resp.content
-        except httpx.HTTPError as e:
-            print(f"Panorama detect: failed to fetch slice at heading {heading:.1f}°: {e}")
-            return heading, None
-
-    tasks = [fetch_slice(h) for h in slices]
-    results = await asyncio.gather(*tasks)
-    t_fetch = (time.time() - t_fetch_start) * 1000
-
-    # Run inference on each slice and collect angular detections
-    all_angular_dets: list[AngularDetection] = []
-    total_yolo_ms = 0.0
-    total_depth_ms = 0.0
-    total_postproc_ms = 0.0
-
-    for slice_heading, image_bytes in results:
-        if image_bytes is None:
-            continue
-
-        try:
-            t_pil_start = time.time()
-            image = Image.open(io.BytesIO(image_bytes))
-            img_w, img_h = image.size
-            t_pil = (time.time() - t_pil_start) * 1000
-        except Exception as e:
-            print(f"Panorama detect: failed to load slice image at heading {slice_heading:.1f}°: {e}")
-            continue
-
-        t_yolo_start = time.time()
-        yolo_results = model.predict(image, conf=request.confidence, imgsz=512, verbose=False)
-        t_yolo = (time.time() - t_yolo_start) * 1000
-        total_yolo_ms += t_yolo
-        yolo_speed = yolo_results[0].speed if yolo_results else {}
-
-        # Run depth estimation once per slice (only if detections found)
-        slice_has_dets = any(r.boxes is not None and len(r.boxes) > 0 for r in yolo_results)
-        depth_tensor = None
-        t_depth = 0.0
-        if slice_has_dets:
-            try:
-                depth_start = time.time()
-                depth_result = depth_model(image)
-                depth_tensor = depth_result["predicted_depth"]  # torch tensor with metric depth
-                t_depth = (time.time() - depth_start) * 1000
-                total_depth_ms += t_depth
-            except Exception as e:
-                print(f"Panorama detect: depth estimation failed for slice {slice_heading:.1f}°: {e}")
-
-        t_postproc_start = time.time()
-        for r in yolo_results:
-            if r.boxes is None:
-                continue
-            for box in r.boxes:
-                x1, y1, x2, y2 = map(float, box.xyxy[0].tolist())
-                conf = float(box.conf[0])
-                cls_name = model.names[int(box.cls[0])]
-
-                # Detection center and size in pixels
-                cx = (x1 + x2) / 2
-                cy = (y1 + y2) / 2
-
-                # Sample depth at bbox center
-                det_depth_m_raw = None
-                det_depth_m = None
-                if depth_tensor is not None:
-                    try:
-                        depth_arr = depth_tensor.cpu().numpy() if torch.is_tensor(depth_tensor) else np.array(depth_tensor)
-                        px_x = int(min(max(cx, 0), depth_arr.shape[1] - 1))
-                        px_y = int(min(max(cy, 0), depth_arr.shape[0] - 1))
-                        det_depth_m_raw = float(depth_arr[px_y, px_x])
-                    except Exception as e:
-                        print(f"Panorama detect: depth sampling failed: {e}")
-
-                # Convert center to angular coords
-                center_heading, center_pitch = pixel_to_angular(
-                    cx, cy, slice_heading, request.pitch,
-                    slice_fov, img_w, img_h
-                )
-
-                # Convert corners to get angular dimensions
-                tl_h, tl_p = pixel_to_angular(x1, y1, slice_heading, request.pitch, slice_fov, img_w, img_h)
-                tr_h, tr_p = pixel_to_angular(x2, y1, slice_heading, request.pitch, slice_fov, img_w, img_h)
-                bl_h, bl_p = pixel_to_angular(x1, y2, slice_heading, request.pitch, slice_fov, img_w, img_h)
-                br_h, br_p = pixel_to_angular(x2, y2, slice_heading, request.pitch, slice_fov, img_w, img_h)
-
-                # Angular width: average of top and bottom edge spans
-                top_w = tr_h - tl_h
-                if top_w > 180: top_w -= 360
-                if top_w < -180: top_w += 360
-                bot_w = br_h - bl_h
-                if bot_w > 180: bot_w -= 360
-                if bot_w < -180: bot_w += 360
-                ang_w = abs((top_w + bot_w) / 2)
-
-                # Angular height: average of left and right edge spans
-                ang_h = abs(((tl_p - bl_p) + (tr_p - br_p)) / 2)
-
-                # Infer panel configuration and calibrate depth using inferred sign height
-                inferred_height_cm, panel_layout = infer_sign_cluster_height(ang_h, ang_w, source_detections_count=1)
-                reference_height_m = inferred_height_cm / 100.0
-                pixel_size = int(max(x2 - x1, y2 - y1))  # Use max dimension as bbox size
-                depth_calibrated = None
-                size_correction = None
-
-                if det_depth_m_raw is not None and ang_h > 0:
-                    ang_h_rad = math.radians(ang_h)
-                    # Estimated height from depth + angular size
-                    estimated_height_m = 2 * det_depth_m_raw * math.tan(ang_h_rad / 2)
-                    if estimated_height_m > 0:
-                        # Single-reference calibration: scale factor from inferred height
-                        scale_factor = reference_height_m / estimated_height_m
-                        det_depth_m = det_depth_m_raw * scale_factor
-                        depth_calibrated = det_depth_m
-
-                        # Convert camera-relative depth (Z along ray) to horizontal along-road distance
-                        pitch_rad = math.radians(center_pitch)
-                        det_depth_m = det_depth_m * math.cos(pitch_rad)
-                        if depth_calibrated:
-                            depth_calibrated = depth_calibrated * math.cos(pitch_rad)
-
-                all_angular_dets.append(AngularDetection(
-                    heading=center_heading,
-                    pitch=center_pitch,
-                    angular_width=ang_w,
-                    angular_height=ang_h,
-                    confidence=conf,
-                    class_name=cls_name,
-                    depth_anything_meters=det_depth_m,
-                    depth_anything_meters_raw=det_depth_m_raw,
-                    inferred_panel_layout=panel_layout,
-                    reference_height_cm=inferred_height_cm,
-                    depth_calibrated=depth_calibrated,
-                    pixel_size=pixel_size,
-                    size_correction=size_correction,
-                ))
-
-        t_postproc = (time.time() - t_postproc_start) * 1000
-        total_postproc_ms += t_postproc
-        print(f"  Slice {slice_heading:.1f}°: pil={t_pil:.0f}ms yolo={t_yolo:.0f}ms (preproc={yolo_speed.get('preprocess', 0):.0f}ms infer={yolo_speed.get('inference', 0):.0f}ms postproc={yolo_speed.get('postprocess', 0):.0f}ms) depth={t_depth:.0f}ms postproc={t_postproc:.0f}ms")
-
-    print(f"Panorama detect: {len(all_angular_dets)} raw detections before NMS")
-
-    t_nms_start = time.time()
-    # NMS to merge overlapping detections from adjacent slices
-    merged = nms_angular(all_angular_dets, request.nms_iou_threshold)
-    t_nms = (time.time() - t_nms_start) * 1000
-
-    t_total = (time.time() - t_start_total) * 1000
-
-    print(f"Panorama detect: {len(merged)} detections after NMS")
-    print(f"PROFILE /detect-panorama: fetch={t_fetch:.0f}ms yolo_total={total_yolo_ms:.0f}ms depth_total={total_depth_ms:.0f}ms postproc_total={total_postproc_ms:.0f}ms nms={t_nms:.0f}ms total={t_total:.0f}ms")
-
-    return SahiResponse(
-        detections=merged,
-        total_inference_time_ms=round(total_yolo_ms + total_depth_ms, 1),
-        slices_count=num_slices,
-    )
-
-
-@app.post("/detect-panorama", response_model=SahiResponse)
-async def detect_panorama(request: SahiRequest):
-    """Primary panorama detection endpoint used by the web app."""
-    return await detect_panorama_impl(request)
-
-
-@app.post("/detect-sahi", response_model=SahiResponse)
-async def detect_sahi(request: SahiRequest):
-    """Compatibility alias for the panorama detection endpoint."""
-    return await detect_panorama_impl(request)
-
-
-async def detect_single_pano_impl(request: SinglePanoRequest) -> SahiResponse:
+async def detect_single_pano_impl(request: SinglePanoRequest) -> DetectionPanoResponse:
     """Single-image panorama detection: 1 fetch, 1 YOLO, 1 depth, no slicing/NMS."""
     t_start = time.time()
 
@@ -1276,16 +994,16 @@ async def detect_single_pano_impl(request: SinglePanoRequest) -> SahiResponse:
           f"postproc={yolo_speed.get('postprocess', 0):.0f}ms) depth={t_depth:.0f}ms "
           f"dets={len(angular_dets)} total={t_total:.0f}ms")
 
-    return SahiResponse(
+    return DetectionPanoResponse(
         detections=angular_dets,
         total_inference_time_ms=round(t_yolo + t_depth, 1),
         slices_count=1,
     )
 
 
-@app.post("/detect-single-pano", response_model=SahiResponse)
+@app.post("/detect-single-pano", response_model=DetectionPanoResponse)
 async def detect_single_pano(request: SinglePanoRequest):
-    """Single-image detection: no SAHI slicing, faster but lower resolution."""
+    """Single-image detection on a Street View panorama."""
     return await detect_single_pano_impl(request)
 
 
