@@ -529,6 +529,7 @@
 
       function appendSignMapDetection(detectionEntry) {
         const store = getLatestSignMapData();
+
         const sameDetection = (candidate) => {
           if (!candidate || !detectionEntry) return false;
 
@@ -546,13 +547,19 @@
           );
         };
 
+        const existingDetection = store.detections.find((d) => sameDetection(d));
+        const newSigns = detectionEntry.signs || [];
+        const mergedSigns = existingDetection?.signs?.length
+          ? [...newSigns, ...existingDetection.signs]
+          : newSigns;
+
         const nextStore = {
           savedAt: Date.now(),
           source: detectionEntry.source || store.source || "parksight",
           projectionVersion: SIGN_MAP_PROJECTION_VERSION,
           detections: [
             ...store.detections.filter((existing) => !sameDetection(existing)),
-            detectionEntry,
+            { ...detectionEntry, signs: mergedSigns },
           ],
         };
         persistLatestSignMapData(nextStore);
