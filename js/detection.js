@@ -35,6 +35,7 @@ const RULE_CURVE_SAMPLE_STEP_METERS = 3;
 const RULE_CURVE_DEFAULT_LENGTH_METERS = 50;
 const RULE_CURVE_INTERSECTION_SKIP_METERS = 2;
 const RULE_CURVE_STACK_OFFSET_METERS = 0.8;
+const SAME_STREET_PROJECTION_THRESHOLD_METERS = 20;
 
 
 /**
@@ -3867,10 +3868,7 @@ function findDistanceToNextSign(
   const directionSign =
     direction * getWayTravelDirectionSign(sign, wayGeometry, signAnchor);
 
-  // Use first node of wayGeometry as street identity
-  const streetId = `${wayGeometry[0].lat},${getWayNodeLng(wayGeometry[0])}`;
-
-  let nearest = Infinity;
+  let nearestSignDist = Infinity;
 
   for (const candidate of allSigns) {
     if (candidate === sign) continue;
@@ -3879,8 +3877,6 @@ function findDistanceToNextSign(
     const cWay = candidate.wayGeometry;
     if (!hasWayGeometry(cWay)) continue;
 
-    const cStreetId = `${cWay[0].lat},${getWayNodeLng(cWay[0])}`;
-    if (cStreetId !== streetId) continue;
     const cAnchor = projectPointOntoWayGeometry(
       candidate.lat,
       candidate.lng,
@@ -3888,6 +3884,7 @@ function findDistanceToNextSign(
       candidate.segmentIndex ?? null,
     );
     if (!cAnchor) continue;
+    if (cAnchor.distanceMeters > SAME_STREET_PROJECTION_THRESHOLD_METERS) continue;
     const candidateOffset = getWayAnchorOffsetMeters(wayGeometry, cAnchor);
     if (!Number.isFinite(candidateOffset)) continue;
 
@@ -3896,21 +3893,22 @@ function findDistanceToNextSign(
     if (distanceMeters < 1) continue;
     if (signedDistance * directionSign <= 0) continue;
 
-    if (distanceMeters < nearest) {
-      nearest = distanceMeters;
+    if (distanceMeters < nearestSignDist) {
+      nearestSignDist = distanceMeters;
     }
   }
 
-  if (Number.isFinite(nearest)) {
-    return nearest;
-  }
-
-  return findDistanceToNearestCorner(
+  const cornerDist = findDistanceToNearestCorner(
     sign,
     direction,
     wayGeometry,
     intersectionNodes,
     signAnchor,
+  );
+
+  return Math.min(
+    Number.isFinite(nearestSignDist) ? nearestSignDist : Infinity,
+    cornerDist,
   );
 }
 
