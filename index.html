@@ -420,6 +420,7 @@
     <script src="js/streets.js"></script>
     <script src="js/panorama.js"></script>
     <script src="js/streetview.js"></script>
+    <script src="js/signRegistry.js"></script>
     <script src="js/detection.js"></script>
 
     <!-- Google Maps API (loaded after config.js so we have the API key) -->
@@ -454,9 +455,9 @@
       let latestRenderedSignMapData = null;
       const SIGN_MAP_STORAGE_KEY = "parksight_latest_sign_map_data";
       const SIGN_MAP_PROJECTION_VERSION = 6;
-      const INITIAL_LOCATION = { lat: 42.3615, lon: -71.0921 };
+      const INITIAL_LOCATION = { lat: 42.36157, lon: -71.09727 };
       const DEFAULT_SIDE = "right";
-      const BASE_HEADING = 90;
+      const BASE_HEADING = 347.1;
       const PREVIEW_ALT_MIN_DISTANCE_METERS = 2.5;
       const PREVIEW_ALT_MAX_DISTANCE_METERS = 80;
       const PREVIEW_ALT_IMPROVEMENT_RATIO = 0.92;
@@ -981,9 +982,10 @@
 
         let totalSigns = 0;
 
+        const renderedUuidsForDots = new Set();
+
         detections.forEach((detection, detectionIndex) => {
           if (!detection.camera) return;
-
 
           const cameraHeading = detection.heading;
           const cameraCircle = L.circleMarker(
@@ -1044,6 +1046,14 @@
 
             if (!sign.panoId && detection.panoId) {
               sign.panoId = detection.panoId;
+            }
+
+            // Avoid drawing multiple dots for the same unique physical sign
+            if (sign.uuid) {
+              if (renderedUuidsForDots.has(sign.uuid)) {
+                continue;
+              }
+              renderedUuidsForDots.add(sign.uuid);
             }
 
             const signCircle = L.circleMarker([sign.lat, sign.lng], {
@@ -1198,6 +1208,8 @@
 
         // Track rendered curves to avoid duplicates (same sign location + direction)
         const renderedKeys = new Set();
+        // Track rendered UUIDs to avoid drawing multiple signs for the same UUID
+        const renderedUuids = new Set();
         const SIGN_LOCATION_PRECISION = 4; // ~11m precision for dedup
 
         // Cache intersection nodes per wayGeometry reference
@@ -1213,6 +1225,14 @@
           for (const sign of detection.signs || []) {
             const ocrResult = sign.ocrResult;
             if (!ocrResult?.is_parking_sign) continue;
+
+            // Skip if we have already drawn this unique sign
+            if (sign.uuid) {
+              if (renderedUuids.has(sign.uuid)) {
+                continue;
+              }
+              renderedUuids.add(sign.uuid);
+            }
 
             const rawWayGeo = wayGeometry || sign.wayGeometry;
             const signWayGeo = (() => {
@@ -1851,7 +1871,7 @@
         }
 
         // Initialize Leaflet map
-        map = L.map("map", { maxZoom: 20, minZoom: 2 }).setView([42.3615, -71.0921], 16);
+        map = L.map("map", { maxZoom: 20, minZoom: 2 }).setView([42.36157, -71.09727], 20);
 
         // Add tile layer (OpenStreetMap with street names)
         L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -1870,6 +1890,50 @@
           if (e.shiftKey && e.key === "D") {
             e.preventDefault();
             toggleDebugOverlays();
+          }
+        });
+
+        // Eval capture point logger
+        let evalCapturePoints = [];
+        const EVAL_CAPTURE_KEY = "parksight_eval_capture_points";
+        document.addEventListener("keydown", (e) => {
+          const statusEl = document.getElementById("detectionStatus");
+          // M: mark current panorama position + heading as eval capture point
+          if (e.key === "m" && !e.shiftKey && !e.ctrlKey && !e.altKey) {
+            if (!detectionPanorama || !detectionPanorama.getPosition?.()) return;
+            const pos = detectionPanorama.getPosition();
+            const pov = detectionPanorama.getPov();
+            const panoId = detectionPanorama.getPano?.() || null;
+            evalCapturePoints.push({
+              lat: pos.lat(),
+              lng: pos.lng(),
+              heading: Math.round(pov.heading * 10) / 10,
+              panoId,
+            });
+            console.log(`[eval-capture] Point ${evalCapturePoints.length} logged:`, evalCapturePoints[evalCapturePoints.length - 1]);
+            if (statusEl) statusEl.textContent = `Eval point logged (${evalCapturePoints.length} total)`;
+          }
+          // Shift+M: save to localStorage and download as JSON
+          if (e.key === "M" && e.shiftKey && !e.ctrlKey) {
+            if (evalCapturePoints.length === 0) {
+              if (statusEl) statusEl.textContent = "No eval points to export";
+              return;
+            }
+            const json = JSON.stringify(evalCapturePoints, null, 2);
+            try {
+              localStorage.setItem(EVAL_CAPTURE_KEY, json);
+              console.log("[eval-capture] Saved to localStorage:", EVAL_CAPTURE_KEY);
+            } catch (err) {
+              console.warn("[eval-capture] localStorage write failed:", err.message);
+            }
+            console.log("[eval-capture] Exporting points:", json);
+            const blob = new Blob([json], { type: "application/json" });
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = "capture-points.json";
+            a.click();
+            URL.revokeObjectURL(a.href);
+            if (statusEl) statusEl.textContent = `Saved ${evalCapturePoints.length} eval points`;
           }
         });
 

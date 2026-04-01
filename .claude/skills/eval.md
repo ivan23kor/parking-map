@@ -54,7 +54,11 @@ Read and display a brief summary of the report:
 - Video filename (e.g., `test-rule-curve-intersections.webm`)
 - Any errors encountered
 
-Note: Videos are recorded automatically but not analyzed by the evaluator unless explicitly requested by a human.
+**Mandatory checks:**
+1. **Video must exist.** If `report.json` has `"video": null` or no `.webm` file exists in `evals/runs/<feature-name>/`, warn that the inspector forgot `RECORD_VIDEO=on`. The eval is incomplete without video.
+2. **Screenshots on every state change.** There should be a screenshot after every visual transition (page load, click, detection complete, data render). If the screenshot count is suspiciously low relative to steps, flag it.
+
+Note: Videos are recorded automatically (when `RECORD_VIDEO=on` is set) but not analyzed by the evaluator unless explicitly requested by a human.
 
 ### Step 5: Run Evaluator
 

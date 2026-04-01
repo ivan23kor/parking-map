@@ -89,15 +89,22 @@ For each inspection, write a temporary Playwright test file and run it:
 RECORD_VIDEO=on bunx playwright test evals/runs/<feature>/inspect.spec.js
 ```
 
-This enables video recording (`.webm` format) of the test run. Videos are saved to `evals/runs/<feature>/` alongside screenshots and report.json.
+**MANDATORY: Always set `RECORD_VIDEO=on`.** The Playwright config only enables video when this env var is set. Without it, no video is recorded and the eval is incomplete.
+
+Videos are saved as `.webm` files in `evals/runs/<feature>/` alongside screenshots and report.json.
 
 The test file should:
 1. Navigate to the app URL
 2. Execute each step from the spec (page.evaluate, clicks, waits)
-3. Take screenshots at specified points
+3. Take a screenshot on **every visual state change** (page load, after click, after detection completes, after data renders, etc.)
 4. Extract DOM/layer data via page.evaluate
 5. Collect all console output
 6. Write report.json with all captured data
+
+### Screenshot and Video Rules
+
+- **Screenshots:** Capture a full-page screenshot after every action that changes what the user sees. Not just at "specified points" — at every visual transition. Name them sequentially: `01-description.png`, `02-description.png`, etc.
+- **Video:** Always present. The `RECORD_VIDEO=on` env var is mandatory for every eval run. If you forget it, the eval is broken. Include the video filename in `report.json` under the `"video"` field.
 
 ## Console Capture
 

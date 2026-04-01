@@ -19,6 +19,9 @@ const panoramaLinkSpotRequestsInFlight = new Set();
 let debugOverlaysEnabled = false;
 let debugMapLayer = null; // Leaflet layer group for debug overlays on 2D map
 
+// Initialize global sign registry
+window.signRegistry = new SignRegistry();
+
 // OCR modal state
 let ocrModalEl = null;
 let ocrResults = new Map(); // Cache OCR results by detection index
@@ -1755,6 +1758,21 @@ async function runOcrOnAllDetections() {
       console.log(`OCR cluster result [${i}]:`, ocrResult);
       ocrResults.set(i, ocrResult);
       det.ocrResult = ocrResult;
+
+      // Hook up deduplication: Register sign and assign UUID
+      const pos = detectionPanorama?.getPosition?.();
+      const cameraLat = pos?.lat?.();
+      const cameraLng = pos?.lng?.();
+      if (cameraLat && cameraLng) {
+        det.uuid = window.signRegistry.registerSign(
+          det,
+          ocrResult,
+          cameraLat,
+          cameraLng
+        );
+      } else {
+        det.uuid = crypto.randomUUID();
+      }
     } catch (err) {
       console.warn(`OCR error [${i}]:`, err);
       const errorMsg = `OCR failed: ${err.message}`;
