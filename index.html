@@ -1034,6 +1034,8 @@
           );
 
           for (const sign of detection.signs || []) {
+            if (sign.ocrResult && sign.ocrResult.is_parking_sign === false) continue;
+
             if (!sign.panoId && detection.panoId) {
               sign.panoId = detection.panoId;
             }
