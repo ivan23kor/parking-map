@@ -3,14 +3,14 @@
  * Parking Sign OCR Tool
  *
  * Extracts structured parking regulation data from sign images using
- * gemini-3-flash via CLI proxy.
+ * Gemini 3.1 Flash Lite Preview.
  *
  * Usage:
  *   bun run scripts/ocr-sign.ts <image_path>
  *   bun run scripts/ocr-sign.ts  # Uses latest screenshot
  *
  * Requires:
- *   CLI proxy running on localhost:8317
+ *   GEMINI_API_KEY environment variable
  *
  * Output:
  *   JSON object with parking rules extracted from the sign:
@@ -98,9 +98,9 @@ Your entire response must conform exactly to this JSON structure:
 - Do NOT add any text, commentary, or formatting outside the JSON object.`;
 
 async function main() {
-  const apiKey = process.env.CLI_PROXY_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    console.error("CLI_PROXY_API_KEY not set");
+    console.error("GEMINI_API_KEY not set");
     process.exit(1);
   }
 
@@ -141,38 +141,24 @@ async function main() {
     .png({ quality: 80 })
     .toBuffer();
   const base64Image = resizedBuffer.toString("base64");
-  // Detect MIME from raw bytes (sharp outputs PNG here, but be safe)
   const mime = imageBuffer[0] === 0x89 ? "image/png" : "image/jpeg";
-  const imageDataUrl = `data:${mime};base64,${base64Image}`;
 
-  const response = await fetch("http://localhost:8317/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model: "gemini-3-flash",
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "image_url",
-              image_url: {
-                url: imageDataUrl
-              }
-            },
-            {
-              type: "text",
-              text: OCR_PROMPT
-            }
+  const model = process.env.GEMINI_OCR_MODEL ?? "gemini-3.1-flash-lite-preview";
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { inline_data: { mime_type: mime, data: base64Image } },
+            { text: OCR_PROMPT }
           ]
-        }
-      ],
-      max_tokens: 4096
-    })
-  });
+        }]
+      })
+    }
+  );
 
   if (!response.ok) {
     const error = await response.text();
@@ -183,8 +169,9 @@ async function main() {
 
   const data = await response.json() as any;
 
-  if (data.choices && data.choices.length > 0) {
-    console.log(data.choices[0].message.content);
+  const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (content) {
+    console.log(content);
   } else {
     console.error("No content in response");
     console.error(JSON.stringify(data, null, 2));
