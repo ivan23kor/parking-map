@@ -58,10 +58,9 @@ const TILE_GRID_WIDTH = 32 * TILE_SIZE; // 16384
 const TILE_GRID_HEIGHT = 16 * TILE_SIZE; // 8192
 const CROP_PADDING_X = 1.2; // 20% wider total around the detected sign
 const CROP_PADDING_Y = 1.5; // Preserve 25% extra sign height above and below the detection
-// Shift crop center down by this fraction of angular height. The detection bbox
-// geometric center sits above the sign's visual center (e.g. red band at bottom),
-// and Static API vs Tiles coordinate frames can add a small vertical offset.
-const CROP_PITCH_BIAS_DOWN = 0.25;
+// Pitch bias no longer needed: backend now uses angular midpoint of bbox corners
+// instead of gnomonic pixel center, which was the source of the vertical offset.
+const CROP_PITCH_BIAS_DOWN = 0;
 const DETECTION_CLUSTER_WIDTH_RATIO = 1.25;
 const DETECTION_CLUSTER_HEIGHT_RATIO = 2.4;
 const DETECTION_CLUSTER_WIDTH_FLOOR = 0.35;
@@ -2007,6 +2006,16 @@ async function buildDetectionCropPlan(det, panoId, cropCenterOverride = null) {
     CROP_PADDING_Y,
   );
 
+  console.log("CROP_PLAN", {
+    detection: { heading: det.heading, pitch: det.pitch, angularWidth: det.angularWidth, angularHeight: det.angularHeight },
+    pano: { heading: panoHeading, tilt },
+    bias: { pitchBias, cropPitch },
+    pixel: { uncorrected, corrected, yCorrection: corrected.yCorrection },
+    signSize,
+    crop: { cropBounds, tileX1, tileY1, tileCount: tiles.length },
+    padded: { pw: signSize.width * CROP_PADDING_X, ph: signSize.height * CROP_PADDING_Y },
+  });
+
   return {
     session,
     metadata,
@@ -2063,12 +2072,17 @@ async function fetchDetectionCropPreview(det, panoId) {
   }
 
   const result = await resp.json();
+  if (result.crop_diagnostics) {
+    console.log("CROP_DIAGNOSTICS", result.crop_diagnostics);
+  }
+  const diag = result.crop_diagnostics || null;
   if (result.image_base64) {
     return {
       src: `data:image/jpeg;base64,${result.image_base64}`,
       width: result.width,
       height: result.height,
       tilesFetched: result.tiles_fetched,
+      cropDiagnostics: diag,
     };
   }
 
@@ -2078,6 +2092,7 @@ async function fetchDetectionCropPreview(det, panoId) {
       width: result.width,
       height: result.height,
       tilesFetched: result.tiles_fetched,
+      cropDiagnostics: diag,
     };
   }
 
@@ -2087,6 +2102,7 @@ async function fetchDetectionCropPreview(det, panoId) {
       width: result.width,
       height: result.height,
       tilesFetched: result.tiles_fetched,
+      cropDiagnostics: diag,
     };
   }
 

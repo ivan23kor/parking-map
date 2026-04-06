@@ -1645,12 +1645,28 @@
           `;
         }
 
+        let diagSection = "";
+        const diag = sign.cropDiagnostics;
+        if (diag) {
+          const [shiftX, shiftY] = diag.recenter_shift;
+          const shifted = shiftX !== 0 || shiftY !== 0;
+          const shiftStyle = shifted ? "color: #ef4444; font-weight: 600;" : "color: #9ca3af;";
+          diagSection = `
+            <div style="font-size: 10px; color: #9ca3af; margin-top: 4px; font-family: monospace;">
+              <span style="${shiftStyle}">shift: ${shiftX}, ${shiftY}</span>
+              | stitch: ${diag.stitch_size[0]}x${diag.stitch_size[1]}
+              | req: [${diag.requested.join(",")}]
+            </div>
+          `;
+        }
+
         container.innerHTML = `
           <img src="${state.src}" alt="Detected parking sign preview">
           <div class="sign-info">
             <span>Est: ${sign.distance?.toFixed(1)}m</span>
             ${layoutInfo}
           </div>
+          ${diagSection}
           ${ocrSection}
         `;
       }
@@ -2038,6 +2054,7 @@
               previewPanoId,
             );
             sign.previewSrc = preview.src;
+            sign.cropDiagnostics = preview.cropDiagnostics;
             renderSignPreviewContent(container, sign, {
               src: sign.previewSrc,
               ocrLoading,

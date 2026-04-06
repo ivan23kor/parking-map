@@ -533,6 +533,9 @@ async def crop_sign_tiles(request: CropSignTilesRequest):
     x2 = request.crop_x + request.crop_width
     y2 = request.crop_y + request.crop_height
 
+    # Save original bounds for diagnostics
+    orig_x1, orig_y1, orig_x2, orig_y2 = x1, y1, x2, y2
+
     # Shift crop inward when it extends past image boundaries
     if x1 < 0:
         x2 -= x1
@@ -580,7 +583,13 @@ async def crop_sign_tiles(request: CropSignTilesRequest):
         "image_url": f"/detected-signs/{filename}" if filename else None,
         "width": x2 - x1,
         "height": y2 - y1,
-        "tiles_fetched": len(request.tiles)
+        "tiles_fetched": len(request.tiles),
+        "crop_diagnostics": {
+            "requested": [orig_x1, orig_y1, orig_x2 - orig_x1, orig_y2 - orig_y1],
+            "clamped": [x1, y1, x2 - x1, y2 - y1],
+            "stitch_size": [stitch_width, stitch_height],
+            "recenter_shift": [orig_x1 - x1, orig_y1 - y1],
+        },
     }
 
     if request.include_image:
@@ -959,7 +968,7 @@ async def detect_single_pano_impl(request: SinglePanoRequest) -> DetectionPanoRe
                 except Exception as e:
                     print(f"Single-pano detect: depth sampling failed: {e}")
 
-            center_heading, center_pitch = pixel_to_angular(
+            center_heading, _ = pixel_to_angular(
                 cx, cy, request.heading, request.pitch,
                 request.fov, img_w, img_h
             )
@@ -967,6 +976,8 @@ async def detect_single_pano_impl(request: SinglePanoRequest) -> DetectionPanoRe
             tr_h, tr_p = pixel_to_angular(x2, y1, request.heading, request.pitch, request.fov, img_w, img_h)
             bl_h, bl_p = pixel_to_angular(x1, y2, request.heading, request.pitch, request.fov, img_w, img_h)
             br_h, br_p = pixel_to_angular(x2, y2, request.heading, request.pitch, request.fov, img_w, img_h)
+            # Use angular midpoint of corners — gnomonic pixel center is biased toward horizon
+            center_pitch = (tl_p + tr_p + bl_p + br_p) / 4
 
             top_w = tr_h - tl_h
             if top_w > 180: top_w -= 360
