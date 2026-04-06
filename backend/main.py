@@ -527,11 +527,29 @@ async def crop_sign_tiles(request: CropSignTilesRequest):
         paste_y = (ty - request.tile_y1) * TILE_SIZE
         stitched.paste(tile_img, (paste_x, paste_y))
     
-    # Calculate crop bounds (clamped to image)
-    x1 = max(0, request.crop_x)
-    y1 = max(0, request.crop_y)
-    x2 = min(stitch_width, request.crop_x + request.crop_width)
-    y2 = min(stitch_height, request.crop_y + request.crop_height)
+    # Calculate crop bounds (clamped to image, re-centered if hitting edges)
+    x1 = request.crop_x
+    y1 = request.crop_y
+    x2 = request.crop_x + request.crop_width
+    y2 = request.crop_y + request.crop_height
+
+    # Shift crop inward when it extends past image boundaries
+    if x1 < 0:
+        x2 -= x1
+        x1 = 0
+    if y1 < 0:
+        y2 -= y1
+        y1 = 0
+    if x2 > stitch_width:
+        x1 -= (x2 - stitch_width)
+        x2 = stitch_width
+    if y2 > stitch_height:
+        y1 -= (y2 - stitch_height)
+        y2 = stitch_height
+
+    # Final clamp (in case crop is larger than image)
+    x1 = max(0, x1)
+    y1 = max(0, y1)
     
     cropped = stitched.crop((x1, y1, x2, y2))
     

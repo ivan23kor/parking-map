@@ -2201,6 +2201,20 @@
 
           const updatedStore = appendSignMapDetection(detection);
           renderSignMapData(updatedStore, _lastAllWays);
+
+          // Refresh any open popup that was showing "Extracting text..."
+          for (const sign of detection.signs) {
+            if (!sign.previewContainerId || !sign.ocrResult) continue;
+            const container = document.getElementById(sign.previewContainerId);
+            if (!container) continue;
+            renderSignPreviewContent(container, sign, {
+              src: sign.previewSrc || null,
+              error: sign.previewError || null,
+              ocrLoading: false,
+              ocrError: sign.ocrError || null,
+              ocrResult: sign.ocrResult,
+            });
+          }
         });
 
 
