@@ -58,8 +58,6 @@ const TILE_GRID_WIDTH = 32 * TILE_SIZE; // 16384
 const TILE_GRID_HEIGHT = 16 * TILE_SIZE; // 8192
 const CROP_PADDING_X = 1.2; // 20% wider total around the detected sign
 const CROP_PADDING_Y = 1.5; // Preserve 25% extra sign height above and below the detection
-// Pitch bias no longer needed: backend now uses angular midpoint of bbox corners
-// instead of gnomonic pixel center, which was the source of the vertical offset.
 const CROP_PITCH_BIAS_DOWN = 0;
 const DETECTION_CLUSTER_WIDTH_RATIO = 1.25;
 const DETECTION_CLUSTER_HEIGHT_RATIO = 2.4;
@@ -1773,8 +1771,9 @@ async function runOcrOnAllDetections() {
       });
 
       if (!ocrResp.ok) {
-        console.warn(`OCR [${i}]: request failed`);
-        throw new Error("OCR request failed");
+        const errBody = await ocrResp.text();
+        console.warn(`OCR [${i}]: ${ocrResp.status} ${errBody}`);
+        throw new Error(`OCR request failed: ${ocrResp.status} ${errBody}`);
       }
 
       const ocrResult = await ocrResp.json();
@@ -2076,6 +2075,16 @@ async function fetchDetectionCropPreview(det, panoId) {
     console.log("CROP_DIAGNOSTICS", result.crop_diagnostics);
   }
   const diag = result.crop_diagnostics || null;
+  const meta = {
+    signSize: cropPlan.signSize,
+    cropBounds: cropPlan.cropBounds,
+    tilt: cropPlan.tilt,
+    panoHeading: cropPlan.panoHeading,
+    cropHeading: cropPlan.cropHeading,
+    cropPitch: cropPlan.cropPitch,
+    corrected: cropPlan.corrected,
+    detection: { heading: det.heading, pitch: det.pitch, angularWidth: det.angularWidth, angularHeight: det.angularHeight },
+  };
   if (result.image_base64) {
     return {
       src: `data:image/jpeg;base64,${result.image_base64}`,
@@ -2083,6 +2092,7 @@ async function fetchDetectionCropPreview(det, panoId) {
       height: result.height,
       tilesFetched: result.tiles_fetched,
       cropDiagnostics: diag,
+      cropPlanMeta: meta,
     };
   }
 
@@ -2093,6 +2103,7 @@ async function fetchDetectionCropPreview(det, panoId) {
       height: result.height,
       tilesFetched: result.tiles_fetched,
       cropDiagnostics: diag,
+      cropPlanMeta: meta,
     };
   }
 
@@ -2103,6 +2114,7 @@ async function fetchDetectionCropPreview(det, panoId) {
       height: result.height,
       tilesFetched: result.tiles_fetched,
       cropDiagnostics: diag,
+      cropPlanMeta: meta,
     };
   }
 

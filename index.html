@@ -1255,23 +1255,6 @@
             },
           ).addTo(signMarkersLayer);
 
-          // Add direction arrow showing panorama heading
-          if (Number.isFinite(cameraHeading)) {
-            const arrowLength = 8;
-            const arrowLat = detection.camera.lat + (arrowLength / 111111) * Math.cos((cameraHeading * Math.PI) / 180);
-            const arrowLng = detection.camera.lng + (arrowLength / (111111 * Math.cos((detection.camera.lat * Math.PI) / 180))) * Math.sin((cameraHeading * Math.PI) / 180);
-            L.polyline(
-              [
-                [detection.camera.lat, detection.camera.lng],
-                [arrowLat, arrowLng],
-              ],
-              {
-                color: "#1d4ed8",
-                weight: 3,
-                opacity: 0.95,
-              },
-            ).addTo(signMarkersLayer);
-          }
 
           // Add dashed road centerline marker
           const roadMarkerLatLngs = buildDetectionRoadMarkerLatLngs(detection);
@@ -1435,15 +1418,11 @@
         if (!renderAllWays) {
           try {
             renderAllWays = await fetchStreets(map.getBounds());
-            console.log(`[renderRuleCurves] Overpass fallback OK: ${renderAllWays.length} ways fetched`);
           } catch (e) {
             renderAllWays = [];
             overpassFailed = true;
-            console.warn("renderRuleCurves: fallback Overpass fetch failed", e);
             window.DEBUG_RULE_CURVES = true;
           }
-        } else {
-          console.log(`[renderRuleCurves] Using ${renderAllWays.length} preloaded ways — no Overpass call needed`);
         }
 
         // Collect all signs across all detections for distance-to-next-sign lookup
@@ -1517,25 +1496,12 @@
                   : [];
               intersectionCache.set(signWayGeo, intersectionNodes);
             }
-            console.log(`[renderRuleCurves] sign=(${sign.lat.toFixed(5)},${sign.lng.toFixed(5)}) wayGeo=${signWayGeo?.length ?? 0} nodes, allWays=${renderAllWays.length}, intersections=${intersectionNodes.length}`);
-            if (window.DEBUG_RULE_CURVES) console.log('  intersection nodes:', intersectionNodes);
-            if (intersectionNodes.length === 0) {
-              console.warn(`[renderRuleCurves] ⚠️  0 intersections — curves will stop at wayGeometry endpoint`);
-            }
             const signLocKey = `${sign.lat.toFixed(SIGN_LOCATION_PRECISION)},${sign.lng.toFixed(SIGN_LOCATION_PRECISION)}`;
-
-            // Log OCR rules so we can debug color selection
-            console.log(`[renderRuleCurves][color] sign=(${sign.lat.toFixed(5)},${sign.lng.toFixed(5)})`, {
-              rules: (ocrResult.rules || []).map((r, i) => `[${i}] ${r.category} arrow=${r.arrow_direction ?? 'none'}`),
-              tow_zones: (ocrResult.tow_zones || []).map((tz, i) => `[${i}] arrow=${tz.arrow_direction ?? 'none'}`),
-            });
 
             // Select winning parking rule for each explicit arrow direction.
             // No-arrow rules are excluded; tow zones are rendered separately below.
             const leftWinner = selectWinningRuleForArrowDirection(ocrResult.rules, "left");
             const rightWinner = selectWinningRuleForArrowDirection(ocrResult.rules, "right");
-
-            console.log(`[renderRuleCurves][color] → leftWinner=${leftWinner ? `${leftWinner.rule.category} [arrow:${leftWinner.rule.arrow_direction}, prec:${leftWinner.precedence}]` : 'null'}, rightWinner=${rightWinner ? `${rightWinner.rule.category} [arrow:${rightWinner.rule.arrow_direction}, prec:${rightWinner.precedence}]` : 'null'}`, { leftColor: leftWinner ? RULE_CATEGORY_COLORS[leftWinner.rule.category] : null, rightColor: rightWinner ? RULE_CATEGORY_COLORS[rightWinner.rule.category] : null });
 
             // Helper: trim a latLngs array to the current map viewport
             const trimToViewport = (latLngs) => {
@@ -1557,7 +1523,6 @@
                   for (const dir of directions) {
                     const maxDist = findDistanceToNextSign(signContext, dir, allSigns, signWayGeo, intersectionNodes);
                     const latLngs = buildRuleCurveLatLngs(signContext, signWayGeo, dir, winner.ruleIndex, maxDist);
-                    console.log(`[renderRuleCurves] arrowDir=${arrowDir} dir=${dir} maxDist=${maxDist.toFixed(1)}m pts=${latLngs?.length ?? 0}`);
                     if (!latLngs?.length) continue;
                     const visibleLatLngs = trimToViewport(latLngs);
                     if (!visibleLatLngs) continue;
@@ -1661,7 +1626,10 @@
         }
 
         container.innerHTML = `
-          <img src="${state.src}" alt="Detected parking sign preview">
+          <div class="crop-annotation-container" style="position: relative; cursor: crosshair;" data-sign-id="${sign.previewContainerId}">
+            <img src="${state.src}" alt="Detected parking sign preview">
+            <div class="annotation-line" style="display: none; position: absolute; left: 0; right: 0; height: 2px; background: red; pointer-events: none;"></div>
+          </div>
           <div class="sign-info">
             <span>Est: ${sign.distance?.toFixed(1)}m</span>
             ${layoutInfo}
@@ -1669,6 +1637,9 @@
           ${diagSection}
           ${ocrSection}
         `;
+
+        // Store sign reference on container for annotation lookup
+        container._signRef = sign;
       }
 
       function buildOcrResultHtml(ocrResult) {
@@ -2055,6 +2026,7 @@
             );
             sign.previewSrc = preview.src;
             sign.cropDiagnostics = preview.cropDiagnostics;
+            sign.cropPlanMeta = preview.cropPlanMeta;
             renderSignPreviewContent(container, sign, {
               src: sign.previewSrc,
               ocrLoading,
@@ -2718,6 +2690,101 @@
           console.error("_dump() error:", err);
           return state;
         }
+      };
+      // === Crop Annotation Tool ===
+      // Click on sign top in crop image to log offset data. No hotkey needed.
+      const _annotations = [];
+
+      // Track mouse on crop containers — always show red line
+      document.addEventListener("mousemove", (e) => {
+        const container = e.target.closest(".crop-annotation-container");
+        if (!container) return;
+        const img = container.querySelector("img");
+        if (!img) return;
+        const rect = img.getBoundingClientRect();
+        const y = e.clientY - rect.top;
+        if (y < 0 || y > rect.height) return;
+        const line = container.querySelector(".annotation-line");
+        if (line) {
+          line.style.display = "block";
+          line.style.top = `${y}px`;
+        }
+      });
+
+      // Click to mark sign top
+      document.addEventListener("click", (e) => {
+        const container = e.target.closest(".crop-annotation-container");
+        if (!container) return;
+        const img = container.querySelector("img");
+        if (!img) return;
+
+        const rect = img.getBoundingClientRect();
+        const clickY = e.clientY - rect.top;
+        if (clickY < 0 || clickY > rect.height) return;
+
+        // Convert from displayed pixels to actual crop pixels
+        const scaleY = img.naturalHeight / rect.height;
+        const signTopY = Math.round(clickY * scaleY);
+
+        const popupContainer = container.closest(".sign-preview-popup");
+        const sign = popupContainer?._signRef;
+        if (!sign) {
+          console.warn("CROP_ANNOTATION: could not find sign data");
+          return;
+        }
+
+        const meta = sign.cropPlanMeta;
+        const diag = sign.cropDiagnostics;
+        const cropHeight = diag?.clamped?.[3] || meta?.cropBounds?.height || img.naturalHeight;
+        const signHeight = meta?.signSize?.height || 0;
+
+        // Expected sign top: crop center minus half sign height
+        const expectedSignTopY = Math.round(cropHeight / 2 - signHeight / 2);
+        const offsetY = signTopY - expectedSignTopY;
+
+        const annotation = {
+          signTopY,
+          expectedSignTopY,
+          offsetY,
+          cropSize: [img.naturalWidth, img.naturalHeight],
+          signSize: meta?.signSize,
+          tilt: meta?.tilt,
+          panoHeading: meta?.panoHeading,
+          cropHeading: meta?.cropHeading,
+          cropPitch: meta?.cropPitch,
+          corrected: meta?.corrected,
+          detection: meta?.detection,
+          cropDiagnostics: diag,
+        };
+        _annotations.push(annotation);
+        console.log("CROP_ANNOTATION", annotation);
+        console.log(`#${_annotations.length} offset: ${offsetY > 0 ? "+" : ""}${offsetY}px`);
+
+        // Visual feedback — briefly flash the line green
+        const line = container.querySelector(".annotation-line");
+        if (line) {
+          line.style.background = "#22c55e";
+          setTimeout(() => { line.style.background = "red"; }, 300);
+        }
+
+        e.preventDefault();
+        e.stopPropagation();
+      }, true);
+
+      // Dump all annotations as CSV to console
+      window._dumpAnnotations = () => {
+        if (_annotations.length === 0) { console.log("No annotations"); return; }
+        const header = "offsetY,signTopY,expectedSignTopY,cropW,cropH,signW,signH,tilt,panoHeading,cropHeading,cropPitch,detPitch,detAngH,yCorrection";
+        const rows = _annotations.map(a => [
+          a.offsetY, a.signTopY, a.expectedSignTopY,
+          a.cropSize[0], a.cropSize[1],
+          a.signSize?.width?.toFixed(1), a.signSize?.height?.toFixed(1),
+          a.tilt?.toFixed(3), a.panoHeading?.toFixed(2),
+          a.cropHeading?.toFixed(2), a.cropPitch?.toFixed(4),
+          a.detection?.pitch?.toFixed(4), a.detection?.angularHeight?.toFixed(4),
+          a.corrected?.yCorrection?.toFixed(2),
+        ].join(","));
+        console.log("ANNOTATIONS_CSV:\n" + header + "\n" + rows.join("\n"));
       };
     </script>
   </body>
