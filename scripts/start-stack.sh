@@ -99,6 +99,7 @@ echo "Starting backend on http://127.0.0.1:${BACKEND_PORT}"
 "$ROOT_DIR/.venv/bin/python" -m uvicorn backend.main:app \
   --host 127.0.0.1 \
   --port "$BACKEND_PORT" \
+  --reload \
   >"$LOG_DIR/backend.log" 2>&1 &
 BACKEND_PID=$!
 

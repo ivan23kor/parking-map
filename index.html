@@ -1223,17 +1223,15 @@
         return pts;
       }
 
-      async function renderSignMapData(data, allWays = null) {
+      async function renderSignMapData(data, allWays = null, autoOpenSignUuids = null) {
         latestRenderedSignMapData = data;
         signMarkersLayer.clearLayers();
 
         const detections = data?.detections || [];
         if (detections.length === 0) {
-          console.log("No persisted sign map data found");
           return;
         }
 
-        console.log("Loaded sign map data on parksight:", data);
 
         let totalSigns = 0;
 
@@ -1305,17 +1303,22 @@
 
             signCircle.bindPopup(createSignPreviewPopupHtml(sign), {
               maxWidth: 220,
+              autoClose: true,
             });
             signCircle.on("popupopen", (event) => {
               loadSignPreview(sign, event.popup);
+              const closeOnMove = () => signCircle.closePopup();
+              map.once("movestart", closeOnMove);
+              signCircle.on("popupclose", () => map.off("movestart", closeOnMove));
             });
+
+            if (autoOpenSignUuids?.has(sign.uuid)) {
+              signCircle.openPopup();
+            }
 
           }
         });
 
-        console.log(
-          `Rendered ${totalSigns} projected sign markers across ${detections.length} panorama detections from ${data.source || "unknown source"}`,
-        );
 
 
 
@@ -2197,7 +2200,6 @@
         });
 
 
-        console.log("App initialized");
         setTimeout(() => map.invalidateSize(), 0);
         window.addEventListener("resize", () => {
           map.invalidateSize();
@@ -2448,7 +2450,6 @@
         // eliminating all additional per-detection Overpass calls.
         const allWays = await fetchStreets(map.getBounds()).catch(() => []);
         _lastAllWays = allWays;
-        console.log(`[rerunDetection] fetched ${allWays.length} ways for map bounds`);
 
         // Refresh road context if the panorama has moved to a different location
         const currentPano = detectionPanorama.getPano();
@@ -2484,15 +2485,6 @@
           await runDetectionOnPanorama(panoId, null, statusEl, true);
 
           // Project detected signs onto the map
-          console.log(
-            `rerunDetection: ${currentDetections.length} detections found, signMarkersLayer exists: ${!!signMarkersLayer}`,
-          );
-          console.log("=== DETECTION COMPLETE ===");
-          currentDetections.forEach((det, i) => {
-            console.log(
-              `  Detection ${i}: heading=${det.heading.toFixed(1)}° pitch=${det.pitch.toFixed(1)}° conf=${det.confidence.toFixed(2)}`,
-            );
-          });
           if (currentDetections.length > 0) {
             try {
               await plotDetectedSigns(allWays);
@@ -2591,8 +2583,9 @@
           renderDebugDecompositionLines(signLocations, cameraLat, cameraLng);
         }
 
+        const newSignUuids = new Set(signLocations.filter(s => s.uuid).map(s => s.uuid));
         const initialStore = appendSignMapDetection(detectionEntry);
-        await renderSignMapData(initialStore, allWays);
+        await renderSignMapData(initialStore, allWays, newSignUuids);
 
         hydrateDetectionPreviews(signLocations, detectedPanoId)
           .then(async () => {
@@ -2600,7 +2593,7 @@
               ...detectionEntry,
               signs: signLocations,
             });
-            await renderSignMapData(hydratedStore, allWays);
+            await renderSignMapData(hydratedStore, allWays, newSignUuids);
           })
           .catch((previewErr) => {
             console.warn("Sign preview hydration failed:", previewErr);

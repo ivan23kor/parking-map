@@ -49,7 +49,6 @@ class SignRegistry {
 
     // 3. If a good match is found, return its UUID
     if (bestMatch && bestScore >= this.SIMILARITY_THRESHOLD) {
-      console.log(`[SignRegistry] Matched existing sign ${bestMatch.uuid.substring(0,8)} (Score: ${bestScore.toFixed(2)})`);
       return bestMatch.uuid;
     }
 
@@ -64,7 +63,6 @@ class SignRegistry {
       detections: 1
     });
     
-    console.log(`[SignRegistry] Registered NEW sign ${newUuid.substring(0,8)} at ${signLoc.lat.toFixed(5)}, ${signLoc.lng.toFixed(5)}`);
     return newUuid;
   }
 

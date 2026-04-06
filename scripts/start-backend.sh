@@ -32,4 +32,4 @@ else
     "$ROOT_DIR/.venv/bin/python" -m pip install -r "$ROOT_DIR/backend/requirements.txt"
 fi
 
-exec "$ROOT_DIR/.venv/bin/python" -m uvicorn backend.main:app --host 127.0.0.1 --port "$BACKEND_PORT"
+exec "$ROOT_DIR/.venv/bin/python" -m uvicorn backend.main:app --host 127.0.0.1 --port "$BACKEND_PORT" --reload

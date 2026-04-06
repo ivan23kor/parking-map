@@ -277,15 +277,6 @@ function mergeAngularDetections(detections) {
       : det.depthAnythingMeters;
     if (Number.isFinite(depthToUse) && depthToUse > 0) {
       detectionDepths.push(depthToUse);
-      // Log per-detection calibration info
-      console.log("Detection calibration:", {
-        rawDepth: det.depthAnythingMetersRaw,
-        calibratedDepth: det.depthCalibrated,
-        pixelSize: det.pixelSize,
-        sizeCorrection: det.sizeCorrection,
-        panelLayout: det.inferredPanelLayout,
-        referenceHeightCm: det.referenceHeightCm,
-      });
     }
   }
 
@@ -295,14 +286,6 @@ function mergeAngularDetections(detections) {
     : detections[0].depthAnythingMeters;
   if (Number.isFinite(firstDepthToUse) && firstDepthToUse > 0) {
     detectionDepths.push(firstDepthToUse);
-    console.log("Detection calibration (first):", {
-      rawDepth: detections[0].depthAnythingMetersRaw,
-      calibratedDepth: detections[0].depthCalibrated,
-      pixelSize: detections[0].pixelSize,
-      sizeCorrection: detections[0].sizeCorrection,
-      panelLayout: detections[0].inferredPanelLayout,
-      referenceHeightCm: detections[0].referenceHeightCm,
-    });
   }
 
   // Aggregate depth: use median of cluster members instead of detection[0] only
@@ -1777,7 +1760,6 @@ async function runOcrOnAllDetections() {
       }
 
       const ocrResult = await ocrResp.json();
-      console.log(`OCR cluster result [${i}]:`, ocrResult);
       ocrResults.set(i, ocrResult);
       det.ocrResult = ocrResult;
 
@@ -1865,23 +1847,6 @@ async function cropAndSaveSign(det, cropCenterOverride = null) {
     // Current panorama viewer state
     const pov = detectionPanorama.getPov();
     const viewerFov = zoomToFov(pov.zoom || 1);
-
-    console.log(
-      `=== CROP PIPELINE ===\n` +
-        `PANO: id=${panoId} heading=${panoHeading.toFixed(2)}° tilt=${tilt.toFixed(4)}°\n` +
-        `VIEWER: heading=${pov.heading.toFixed(2)}° pitch=${pov.pitch.toFixed(2)}° zoom=${(pov.zoom || 1).toFixed(2)} fov=${viewerFov.toFixed(1)}°\n` +
-        `DETECTION angular: heading=${det.heading.toFixed(2)}° pitch=${det.pitch.toFixed(2)}° relH=${detectionRelH.toFixed(2)}° size=${det.angularWidth.toFixed(3)}°×${det.angularHeight.toFixed(3)}° conf=${det.confidence.toFixed(2)}\n` +
-        `CROP center source: ${cropCenterOverride ? `click @ (${cropCenterOverride.screenX.toFixed(1)}, ${cropCenterOverride.screenY.toFixed(1)})` : "detection center"}\n` +
-        `CROP angular: heading=${cropHeading.toFixed(2)}° pitch=${cropPitch.toFixed(2)}° relH=${cropRelH.toFixed(2)}°\n` +
-        `TILE GRID: ${imageWidth}×${imageHeight} (zoom 5, ${TILE_SIZE}px tiles)\n` +
-        `PIXEL uncorrected: (${uncorrected.x.toFixed(1)}, ${uncorrected.y.toFixed(1)})\n` +
-        `PIXEL corrected:   (${corrected.x.toFixed(1)}, ${corrected.y.toFixed(1)}) yCorrection=${corrected.yCorrection.toFixed(1)}px\n` +
-        `PIXEL sign size:   ${signSize.width.toFixed(0)}×${signSize.height.toFixed(0)} (with ${CROP_PADDING_X.toFixed(2)}x/${CROP_PADDING_Y.toFixed(2)}x padding: ${Math.round(signSize.width * CROP_PADDING_X)}×${Math.round(signSize.height * CROP_PADDING_Y)})\n` +
-        `TILES: origin=(${tileX1},${tileY1}) fetching=${JSON.stringify(tiles)}\n` +
-        `CROP in stitched: x=${cropBounds.x} y=${cropBounds.y} w=${cropBounds.width} h=${cropBounds.height}\n` +
-        `CROP center in tile grid: (${(tileX1 * TILE_SIZE + cropBounds.x + cropBounds.width / 2).toFixed(0)}, ${(tileY1 * TILE_SIZE + cropBounds.y + cropBounds.height / 2).toFixed(0)})\n` +
-        `===================`,
-    );
 
     // A/B test: fetch both tiles and static crops in parallel
     const [tilesResp, staticResult] = await Promise.allSettled([
@@ -2005,16 +1970,6 @@ async function buildDetectionCropPlan(det, panoId, cropCenterOverride = null) {
     CROP_PADDING_Y,
   );
 
-  console.log("CROP_PLAN", {
-    detection: { heading: det.heading, pitch: det.pitch, angularWidth: det.angularWidth, angularHeight: det.angularHeight },
-    pano: { heading: panoHeading, tilt },
-    bias: { pitchBias, cropPitch },
-    pixel: { uncorrected, corrected, yCorrection: corrected.yCorrection },
-    signSize,
-    crop: { cropBounds, tileX1, tileY1, tileCount: tiles.length },
-    padded: { pw: signSize.width * CROP_PADDING_X, ph: signSize.height * CROP_PADDING_Y },
-  });
-
   return {
     session,
     metadata,
@@ -2071,9 +2026,6 @@ async function fetchDetectionCropPreview(det, panoId) {
   }
 
   const result = await resp.json();
-  if (result.crop_diagnostics) {
-    console.log("CROP_DIAGNOSTICS", result.crop_diagnostics);
-  }
   const diag = result.crop_diagnostics || null;
   const meta = {
     signSize: cropPlan.signSize,

@@ -18,7 +18,6 @@ async function getSessionToken() {
         try {
             const { token, expiry } = JSON.parse(cached);
             if (Date.now() < expiry && token) {
-                console.log('Using cached session token');
                 return token;
             }
         } catch (e) {
@@ -35,7 +34,6 @@ async function getSessionToken() {
         throw new Error('Google API key not configured');
     }
 
-    console.log('Creating new session token...');
     const resp = await fetch(
         `https://tile.googleapis.com/v1/createSession?key=${apiKey}`,
         {
@@ -78,7 +76,6 @@ async function getSessionToken() {
     }
 
     const data = await resp.json();
-    console.log('Session created successfully');
 
     // Cache token for ~13 days (tokens last ~2 weeks)
     const expiry = Date.now() + 13 * 24 * 60 * 60 * 1000;
