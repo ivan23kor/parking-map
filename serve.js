@@ -20,12 +20,13 @@ const LEGACY_UI_PATHS = ['/ui-map', '/ui-panorama', '/ui-upload', '/dist'];
 
 // ── Live reload via SSE ──
 const WATCH_EXTENSIONS = new Set(['.html', '.js', '.css']);
+const WATCH_IGNORE = ['node_modules', '.', 'logs', 'detected_signs', 'worktrees', '.venv', 'test-results', 'datasets'];
 const sseClients = new Set();
 let reloadVersion = Date.now();
 
 fs.watch('.', { recursive: true }, (eventType, filename) => {
     if (!filename) return;
-    if (filename.startsWith('node_modules') || filename.startsWith('.') || filename.startsWith('logs')) return;
+    if (WATCH_IGNORE.some(dir => filename.startsWith(dir + '/') || filename.startsWith(dir + '\\'))) return;
     const ext = path.extname(filename).toLowerCase();
     if (!WATCH_EXTENSIONS.has(ext)) return;
     reloadVersion = Date.now();
@@ -61,7 +62,6 @@ const server = http.createServer((req, res) => {
             'Cache-Control': 'no-cache',
             'Connection': 'keep-alive',
         });
-        res.write(`data: ${reloadVersion}\n\n`);
         sseClients.add(res);
         req.on('close', () => sseClients.delete(res));
         return;

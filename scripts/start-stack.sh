@@ -48,18 +48,13 @@ ensure_backend_env() {
 
 wait_for_backend() {
   local health_url="http://127.0.0.1:${BACKEND_PORT}/health"
-  local max_attempts=26
+  local max_attempts=30
   local attempt=1
 
   while [ "$attempt" -le "$max_attempts" ]; do
-    if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
-      echo "Backend exited during startup. Check $LOG_DIR/backend.log"
-      return 1
-    fi
-
     if python3 - <<PY >/dev/null 2>&1
 import urllib.request
-urllib.request.urlopen("${health_url}", timeout=1)
+urllib.request.urlopen("${health_url}", timeout=2)
 PY
     then
       return 0
@@ -93,12 +88,26 @@ for pid in $(ss -tlnp 2>/dev/null | grep -E ":${BACKEND_PORT}|:${WEB_PORT}" | gr
   echo "Killing existing process $pid"
   kill "$pid" 2>/dev/null || true
 done
-sleep 1
+
+# Wait for ports to be freed, force-kill if stuck
+for i in $(seq 1 10); do
+  if ! ss -tlnp 2>/dev/null | grep -qE ":${BACKEND_PORT}|:${WEB_PORT}"; then
+    break
+  fi
+  if [ "$i" -eq 5 ]; then
+    echo "Ports still in use, force killing..."
+    for pid in $(ss -tlnp 2>/dev/null | grep -E ":${BACKEND_PORT}|:${WEB_PORT}" | grep -oP 'pid=\K[0-9]+'); do
+      kill -9 "$pid" 2>/dev/null || true
+    done
+  fi
+  sleep 1
+done
 
 echo "Starting backend on http://127.0.0.1:${BACKEND_PORT}"
 "$ROOT_DIR/.venv/bin/python" -m uvicorn backend.main:app \
   --host 127.0.0.1 \
   --port "$BACKEND_PORT" \
+  --reload-dir "$ROOT_DIR/backend" \
   --reload \
   >"$LOG_DIR/backend.log" 2>&1 &
 BACKEND_PID=$!
