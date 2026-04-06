@@ -2163,6 +2163,9 @@
           }
         });
 
+        // Clear projected signs from previous session on reload
+        localStorage.removeItem(SIGN_MAP_STORAGE_KEY);
+
         // Set up event handlers
         setupEventHandlers();
 
