@@ -10,6 +10,7 @@ import os
 import re
 import json as _json
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any
@@ -32,6 +33,8 @@ from ultralytics import YOLO
 MODEL_PATH = Path(__file__).parent / "models" / "best.pt"
 DETECTED_SIGNS_DIR = Path(__file__).parent.parent / "detected_signs"
 DETECTED_SIGNS_DIR.mkdir(exist_ok=True)
+DETECT_TILES_DEBUG_DIR = Path(__file__).parent.parent / "debug_detect_tiles"
+DETECT_TILES_DEBUG_DIR.mkdir(exist_ok=True)
 
 # Load YOLO model at startup
 print(f"Loading model from: {MODEL_PATH}")
@@ -76,6 +79,7 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(title="Parking Sign Detection API", lifespan=lifespan)
 app.mount("/detected-signs", StaticFiles(directory=str(DETECTED_SIGNS_DIR)), name="detected-signs")
+app.mount("/debug-detect-tiles", StaticFiles(directory=str(DETECT_TILES_DEBUG_DIR)), name="debug-detect-tiles")
 
 # CORS for frontend
 app.add_middleware(
@@ -259,6 +263,10 @@ class AngularDetection(BaseModel):
     angular_height: float
     confidence: float
     class_name: str
+    bbox_x1: Optional[float] = None
+    bbox_y1: Optional[float] = None
+    bbox_x2: Optional[float] = None
+    bbox_y2: Optional[float] = None
     depth_anything_meters: Optional[float] = None
     depth_anything_meters_raw: Optional[float] = None
     # Depth calibration fields (Phase 1: Height inference)
@@ -278,12 +286,77 @@ class SinglePanoRequest(BaseModel):
     api_key: str
     img_width: int = 640
     img_height: int = 640
+    skip_depth: bool = False
 
 
 class DetectionPanoResponse(BaseModel):
     detections: list[AngularDetection]
     total_inference_time_ms: float
     slices_count: int
+
+
+class DetectTilesRequest(BaseModel):
+    pano_id: str
+    tiles: list[dict]
+    tile_x1: int
+    tile_y1: int
+    session_token: str
+    api_key: str
+    confidence: float = 0.15
+    skip_depth: bool = False
+    request_heading: Optional[float] = None
+    request_pitch: Optional[float] = None
+    request_fov: Optional[float] = None
+    viewport_width: Optional[int] = None
+    viewport_height: Optional[int] = None
+    detection_band_center_pitch: Optional[float] = None
+    detection_band_half_height_degrees: Optional[float] = None
+    detection_band_top_pitch: Optional[float] = None
+    detection_band_bottom_pitch: Optional[float] = None
+
+
+class DetectTilesDebugArtifact(BaseModel):
+    image_filename: str
+    image_url: str
+    metadata_filename: str
+    metadata_url: str
+    tile_image_filenames: list[str]
+    tile_image_urls: list[str]
+
+
+class PixelDetection(BaseModel):
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    full_pano_x1: float
+    full_pano_y1: float
+    full_pano_x2: float
+    full_pano_y2: float
+    heading: float
+    pitch: float
+    angular_width: float
+    angular_height: float
+    confidence: float
+    class_name: str
+    depth_anything_meters: Optional[float] = None
+    depth_anything_meters_raw: Optional[float] = None
+    inferred_panel_layout: Optional[str] = None
+    reference_height_cm: Optional[int] = None
+    depth_calibrated: Optional[float] = None
+    pixel_size: Optional[int] = None
+    size_correction: Optional[float] = None
+
+
+class TileDetectionResponse(BaseModel):
+    detections: list[PixelDetection]
+    total_inference_time_ms: float
+    stitched_width: int
+    stitched_height: int
+    pano_heading: float
+    tiles_count: int
+    tile_api_requests: int
+    debug_artifact: Optional[DetectTilesDebugArtifact] = None
 
 
 def pixel_to_angular(x: float, y: float, pov_heading: float, pov_pitch: float,
@@ -487,6 +560,212 @@ async def save_dump(body: dict):
 
 
 TILE_SIZE = 512  # Street View tile size
+TILE_ZOOM = 5
+TILE_GRID_COLUMNS = 32
+TILE_GRID_ROWS = 16
+FULL_PANO_WIDTH = TILE_GRID_COLUMNS * TILE_SIZE
+FULL_PANO_HEIGHT = TILE_GRID_ROWS * TILE_SIZE
+
+
+def normalize_tile_x(tile_x: int) -> int:
+    return tile_x % TILE_GRID_COLUMNS
+
+
+def clamp_tile_y(tile_y: int) -> int:
+    return max(0, min(TILE_GRID_ROWS - 1, tile_y))
+
+
+def unwrapped_pixel_to_heading_pitch(
+    x: float,
+    y: float,
+    pano_heading: float,
+    image_width: int = FULL_PANO_WIDTH,
+    image_height: int = FULL_PANO_HEIGHT,
+) -> tuple[float, float]:
+    wrapped_x = x % image_width
+    h = (wrapped_x / image_width) * 360.0
+    pitch = 90.0 - (y / image_height) * 180.0
+    heading = (h - 180.0 + pano_heading + 360.0) % 360.0
+    return heading, pitch
+
+
+async def fetch_streetview_tile_image(
+    pano_id: str,
+    tile_x: int,
+    tile_y: int,
+    session_token: str,
+    api_key: str,
+) -> Image.Image:
+    safe_x = normalize_tile_x(tile_x)
+    safe_y = clamp_tile_y(tile_y)
+    url = (
+        f"https://tile.googleapis.com/v1/streetview/tiles/{TILE_ZOOM}/{safe_x}/{safe_y}"
+        f"?session={session_token}&key={api_key}&panoId={pano_id}"
+    )
+    resp = await httpx_client.get(url, timeout=10.0)
+    resp.raise_for_status()
+    tile_img = Image.open(io.BytesIO(resp.content))
+    if tile_img.size != (TILE_SIZE, TILE_SIZE):
+        tile_img = tile_img.resize((TILE_SIZE, TILE_SIZE), Image.Resampling.LANCZOS)
+    if tile_img.mode != "RGB":
+        tile_img = tile_img.convert("RGB")
+    return tile_img
+
+
+async def stitch_requested_tiles(
+    pano_id: str,
+    tiles: list[dict],
+    tile_x1: int,
+    tile_y1: int,
+    session_token: str,
+    api_key: str,
+) -> tuple[Image.Image, int, int, int]:
+    tile_images: dict[tuple[int, int], Image.Image] = {}
+    for tile in tiles:
+        tx = int(tile["x"])
+        ty = int(tile["y"])
+        try:
+            tile_images[(tx, ty)] = await fetch_streetview_tile_image(
+                pano_id,
+                tx,
+                ty,
+                session_token,
+                api_key,
+            )
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=400, detail=f"Failed to fetch tile {tile}: {e}")
+
+    num_tiles_x = max(int(t["x"]) for t in tiles) - tile_x1 + 1
+    num_tiles_y = max(int(t["y"]) for t in tiles) - tile_y1 + 1
+    stitch_width = num_tiles_x * TILE_SIZE
+    stitch_height = num_tiles_y * TILE_SIZE
+
+    stitched = Image.new("RGB", (stitch_width, stitch_height))
+    for (tx, ty), tile_img in tile_images.items():
+        paste_x = (tx - tile_x1) * TILE_SIZE
+        paste_y = (ty - tile_y1) * TILE_SIZE
+        stitched.paste(tile_img, (paste_x, paste_y))
+
+    tile_api_requests = len(tile_images)
+    return stitched, stitch_width, stitch_height, tile_api_requests
+
+
+def save_detect_tiles_debug_artifacts(
+    request: DetectTilesRequest,
+    stitched: Image.Image,
+    stitch_width: int,
+    stitch_height: int,
+    pano_heading: float,
+    tile_api_requests: int,
+) -> DetectTilesDebugArtifact:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    run_dir = DETECT_TILES_DEBUG_DIR / timestamp
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    stitched_filename = "stitched-input.jpg"
+    stitched.save(run_dir / stitched_filename, quality=95)
+
+    tile_image_filenames: list[str] = []
+    tile_image_urls: list[str] = []
+    normalized_tiles: list[dict[str, Any]] = []
+    for index, tile in enumerate(request.tiles):
+        tx = int(tile["x"])
+        ty = int(tile["y"])
+        crop_x1 = (tx - request.tile_x1) * TILE_SIZE
+        crop_y1 = (ty - request.tile_y1) * TILE_SIZE
+        crop_x2 = crop_x1 + TILE_SIZE
+        crop_y2 = crop_y1 + TILE_SIZE
+        tile_image = stitched.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+        tile_filename = f"tile_{index:02d}_x{tx}_y{ty}.jpg"
+        tile_image.save(run_dir / tile_filename, quality=95)
+        tile_image_filenames.append(tile_filename)
+        tile_image_urls.append(f"/debug-detect-tiles/{timestamp}/{tile_filename}")
+        normalized_tiles.append(
+            {
+                "x": tx,
+                "y": ty,
+                "normalized_x": normalize_tile_x(tx),
+                "normalized_y": clamp_tile_y(ty),
+                "stitched_crop": {
+                    "x": crop_x1,
+                    "y": crop_y1,
+                    "width": TILE_SIZE,
+                    "height": TILE_SIZE,
+                },
+                "image_filename": tile_filename,
+                "image_url": tile_image_urls[-1],
+            }
+        )
+
+    metadata = {
+        "timestamp": timestamp,
+        "pano_id": request.pano_id,
+        "confidence": request.confidence,
+        "skip_depth": request.skip_depth,
+        "pano_heading": pano_heading,
+        "request_heading": request.request_heading,
+        "request_pitch": request.request_pitch,
+        "request_fov": request.request_fov,
+        "viewport_width": request.viewport_width,
+        "viewport_height": request.viewport_height,
+        "detection_band_center_pitch": request.detection_band_center_pitch,
+        "detection_band_half_height_degrees": request.detection_band_half_height_degrees,
+        "detection_band_top_pitch": request.detection_band_top_pitch,
+        "detection_band_bottom_pitch": request.detection_band_bottom_pitch,
+        "tile_origin": {
+            "tile_x1": request.tile_x1,
+            "tile_y1": request.tile_y1,
+        },
+        "tiles_count": len(request.tiles),
+        "tile_api_requests": tile_api_requests,
+        "tiles": normalized_tiles,
+        "stitched_image": {
+            "filename": stitched_filename,
+            "url": f"/debug-detect-tiles/{timestamp}/{stitched_filename}",
+            "width": stitch_width,
+            "height": stitch_height,
+        },
+    }
+
+    metadata_filename = "metadata.json"
+    (run_dir / metadata_filename).write_text(
+        _json.dumps(metadata, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    log_payload = {
+        "pano_id": request.pano_id,
+        "confidence": request.confidence,
+        "skip_depth": request.skip_depth,
+        "pano_heading": pano_heading,
+        "request_heading": request.request_heading,
+        "request_pitch": request.request_pitch,
+        "request_fov": request.request_fov,
+        "viewport_width": request.viewport_width,
+        "viewport_height": request.viewport_height,
+        "detection_band_center_pitch": request.detection_band_center_pitch,
+        "detection_band_half_height_degrees": request.detection_band_half_height_degrees,
+        "detection_band_top_pitch": request.detection_band_top_pitch,
+        "detection_band_bottom_pitch": request.detection_band_bottom_pitch,
+        "tile_x1": request.tile_x1,
+        "tile_y1": request.tile_y1,
+        "tiles_count": len(request.tiles),
+        "tile_api_requests": tile_api_requests,
+        "stitched_width": stitch_width,
+        "stitched_height": stitch_height,
+        "debug_dir": str(run_dir),
+    }
+    logger.info("detect-tiles request: %s", _json.dumps(log_payload, sort_keys=True))
+    print(f"[detect-tiles] {_json.dumps(log_payload, sort_keys=True)}")
+
+    return DetectTilesDebugArtifact(
+        image_filename=stitched_filename,
+        image_url=f"/debug-detect-tiles/{timestamp}/{stitched_filename}",
+        metadata_filename=metadata_filename,
+        metadata_url=f"/debug-detect-tiles/{timestamp}/{metadata_filename}",
+        tile_image_filenames=tile_image_filenames,
+        tile_image_urls=tile_image_urls,
+    )
 
 @app.post("/crop-sign-tiles")
 async def crop_sign_tiles(request: CropSignTilesRequest):
@@ -494,38 +773,14 @@ async def crop_sign_tiles(request: CropSignTilesRequest):
     Fetch Street View tiles at max zoom, stitch if needed, crop sign region.
     This gives much higher resolution than the Static API.
     """
-    # Fetch all required tiles
-    tile_images = {}
-    for tile in request.tiles:
-        url = (
-            f"https://tile.googleapis.com/v1/streetview/tiles/5/{tile['x']}/{tile['y']}"
-            f"?session={request.session_token}&key={request.api_key}&panoId={request.pano_id}"
-        )
-        try:
-            resp = await httpx_client.get(url, timeout=10.0)
-            resp.raise_for_status()
-            tile_img = Image.open(io.BytesIO(resp.content))
-            # Resize if tile size doesn't match expected
-            if tile_img.size != (TILE_SIZE, TILE_SIZE):
-                tile_img = tile_img.resize((TILE_SIZE, TILE_SIZE), Image.Resampling.LANCZOS)
-            tile_images[(tile['x'], tile['y'])] = tile_img
-        except httpx.HTTPError as e:
-            raise HTTPException(status_code=400, detail=f"Failed to fetch tile {tile}: {e}")
-    
-    # Calculate stitched image size
-    num_tiles_x = max(t['x'] for t in request.tiles) - request.tile_x1 + 1
-    num_tiles_y = max(t['y'] for t in request.tiles) - request.tile_y1 + 1
-    stitch_width = num_tiles_x * TILE_SIZE
-    stitch_height = num_tiles_y * TILE_SIZE
-    
-    # Create stitched image
-    stitched = Image.new('RGB', (stitch_width, stitch_height))
-    for (tx, ty), tile_img in tile_images.items():
-        if tile_img.mode != 'RGB':
-            tile_img = tile_img.convert('RGB')
-        paste_x = (tx - request.tile_x1) * TILE_SIZE
-        paste_y = (ty - request.tile_y1) * TILE_SIZE
-        stitched.paste(tile_img, (paste_x, paste_y))
+    stitched, stitch_width, stitch_height, tile_api_requests = await stitch_requested_tiles(
+        request.pano_id,
+        request.tiles,
+        request.tile_x1,
+        request.tile_y1,
+        request.session_token,
+        request.api_key,
+    )
     
     # Calculate crop bounds (clamped to image, re-centered if hitting edges)
     x1 = request.crop_x
@@ -584,6 +839,7 @@ async def crop_sign_tiles(request: CropSignTilesRequest):
         "width": x2 - x1,
         "height": y2 - y1,
         "tiles_fetched": len(request.tiles),
+        "tile_api_requests": tile_api_requests,
         "crop_diagnostics": {
             "requested": [orig_x1, orig_y1, orig_x2 - orig_x1, orig_y2 - orig_y1],
             "clamped": [x1, y1, x2 - x1, y2 - y1],
@@ -592,12 +848,230 @@ async def crop_sign_tiles(request: CropSignTilesRequest):
         },
     }
 
+    print(
+        "[crop-sign-tiles] "
+        + _json.dumps(
+            {
+                "pano_id": request.pano_id,
+                "tiles_count": len(request.tiles),
+                "tile_api_requests": tile_api_requests,
+                "stitch_width": stitch_width,
+                "stitch_height": stitch_height,
+                "saved_filename": filename,
+            },
+            sort_keys=True,
+        )
+    )
+
     if request.include_image:
         image_buffer = io.BytesIO()
         cropped.save(image_buffer, format="JPEG", quality=90)
         response["image_base64"] = base64.b64encode(image_buffer.getvalue()).decode("ascii")
 
     return response
+
+
+@app.post("/detect-tiles", response_model=TileDetectionResponse)
+async def detect_tiles(request: DetectTilesRequest):
+    """Run YOLO and depth on stitched Street View tiles."""
+    try:
+        metadata_resp = await httpx_client.get(
+            (
+                "https://tile.googleapis.com/v1/streetview/metadata"
+                f"?session={request.session_token}&key={request.api_key}&panoId={request.pano_id}"
+            ),
+            timeout=10.0,
+        )
+        metadata_resp.raise_for_status()
+        metadata = metadata_resp.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch pano metadata: {e}")
+
+    pano_heading = float(metadata.get("heading") or 0.0)
+
+    t_start = time.time()
+    print(
+        f"[detect-tiles] tile request plan requested_tiles={len(request.tiles)} "
+        f"tile_origin=({request.tile_x1},{request.tile_y1})"
+    )
+    stitched, stitch_width, stitch_height, tile_api_requests = await stitch_requested_tiles(
+        request.pano_id,
+        request.tiles,
+        request.tile_x1,
+        request.tile_y1,
+        request.session_token,
+        request.api_key,
+    )
+    t_fetch = (time.time() - t_start) * 1000
+    debug_artifact = None
+    try:
+        debug_artifact = save_detect_tiles_debug_artifacts(
+            request,
+            stitched,
+            stitch_width,
+            stitch_height,
+            pano_heading,
+            tile_api_requests,
+        )
+    except Exception as e:
+        print(f"[detect-tiles] debug artifact save failed: {e}")
+        traceback.print_exc()
+
+    t_yolo_start = time.time()
+    yolo_results = model.predict(
+        stitched,
+        conf=request.confidence,
+        imgsz=512,
+        verbose=False,
+    )
+    t_yolo = (time.time() - t_yolo_start) * 1000
+
+    has_dets = any(r.boxes is not None and len(r.boxes) > 0 for r in yolo_results)
+    depth_tensor = None
+    t_depth = 0.0
+    if has_dets and not request.skip_depth:
+        try:
+            depth_start = time.time()
+            depth_result = depth_model(stitched)
+            depth_tensor = depth_result["predicted_depth"]
+            t_depth = (time.time() - depth_start) * 1000
+        except Exception as e:
+            print(f"Tile detect: depth estimation failed: {e}")
+
+    pixel_dets: list[PixelDetection] = []
+    for r in yolo_results:
+        if r.boxes is None:
+            continue
+        for box in r.boxes:
+            x1, y1, x2, y2 = map(float, box.xyxy[0].tolist())
+            conf = float(box.conf[0])
+            cls_name = model.names[int(box.cls[0])]
+
+            full_x1 = request.tile_x1 * TILE_SIZE + x1
+            full_y1 = request.tile_y1 * TILE_SIZE + y1
+            full_x2 = request.tile_x1 * TILE_SIZE + x2
+            full_y2 = request.tile_y1 * TILE_SIZE + y2
+
+            center_x = (full_x1 + full_x2) / 2.0
+            center_y = (full_y1 + full_y2) / 2.0
+            center_heading, center_pitch = unwrapped_pixel_to_heading_pitch(
+                center_x,
+                center_y,
+                pano_heading,
+            )
+
+            left_heading, _ = unwrapped_pixel_to_heading_pitch(full_x1, center_y, pano_heading)
+            right_heading, _ = unwrapped_pixel_to_heading_pitch(full_x2, center_y, pano_heading)
+            _, top_pitch = unwrapped_pixel_to_heading_pitch(center_x, full_y1, pano_heading)
+            _, bottom_pitch = unwrapped_pixel_to_heading_pitch(center_x, full_y2, pano_heading)
+
+            angular_width = right_heading - left_heading
+            if angular_width > 180:
+                angular_width -= 360
+            if angular_width < -180:
+                angular_width += 360
+            angular_width = abs(angular_width)
+            angular_height = abs(top_pitch - bottom_pitch)
+
+            det_depth_m_raw = None
+            det_depth_m = None
+            depth_calibrated = None
+            pixel_size = int(max(x2 - x1, y2 - y1))
+            inferred_height_cm, panel_layout = infer_sign_cluster_height(
+                angular_height,
+                angular_width,
+                source_detections_count=1,
+            )
+
+            if depth_tensor is not None:
+                try:
+                    depth_arr = (
+                        depth_tensor.cpu().numpy()
+                        if torch.is_tensor(depth_tensor)
+                        else np.array(depth_tensor)
+                    )
+                    px_x = int(min(max((x1 + x2) / 2.0, 0), depth_arr.shape[1] - 1))
+                    px_y = int(min(max((y1 + y2) / 2.0, 0), depth_arr.shape[0] - 1))
+                    det_depth_m_raw = float(depth_arr[px_y, px_x])
+                except Exception as e:
+                    print(f"Tile detect: depth sampling failed: {e}")
+
+            if det_depth_m_raw is not None and angular_height > 0:
+                ang_h_rad = math.radians(angular_height)
+                estimated_height_m = 2 * det_depth_m_raw * math.tan(ang_h_rad / 2)
+                reference_height_m = inferred_height_cm / 100.0
+                if estimated_height_m > 0:
+                    scale_factor = reference_height_m / estimated_height_m
+                    det_depth_m = det_depth_m_raw * scale_factor
+                    depth_calibrated = det_depth_m
+                    pitch_rad = math.radians(center_pitch)
+                    det_depth_m = det_depth_m * math.cos(pitch_rad)
+                    depth_calibrated = depth_calibrated * math.cos(pitch_rad)
+
+            pixel_dets.append(
+                PixelDetection(
+                    x1=x1,
+                    y1=y1,
+                    x2=x2,
+                    y2=y2,
+                    full_pano_x1=full_x1,
+                    full_pano_y1=full_y1,
+                    full_pano_x2=full_x2,
+                    full_pano_y2=full_y2,
+                    heading=center_heading,
+                    pitch=center_pitch,
+                    angular_width=angular_width,
+                    angular_height=angular_height,
+                    confidence=conf,
+                    class_name=cls_name,
+                    depth_anything_meters=det_depth_m,
+                    depth_anything_meters_raw=det_depth_m_raw,
+                    inferred_panel_layout=panel_layout,
+                    reference_height_cm=inferred_height_cm,
+                    depth_calibrated=depth_calibrated,
+                    pixel_size=pixel_size,
+                    size_correction=None,
+                )
+            )
+
+    total_time_ms = (time.time() - t_start) * 1000
+    print(
+        f"PROFILE /detect-tiles: fetch={t_fetch:.0f}ms yolo={t_yolo:.0f}ms "
+        f"depth={t_depth:.0f}ms dets={len(pixel_dets)} total={total_time_ms:.0f}ms"
+    )
+    print(
+        f"[detect-tiles] tile usage requested_tiles={len(request.tiles)} "
+        f"tile_api_requests={tile_api_requests} stitched={stitch_width}x{stitch_height}"
+    )
+    print(
+        "[detect-tiles] result "
+        + _json.dumps(
+            {
+                "pano_id": request.pano_id,
+                "detections": len(pixel_dets),
+                "fetch_ms": round(t_fetch, 2),
+                "yolo_ms": round(t_yolo, 2),
+                "depth_ms": round(t_depth, 2),
+                "total_ms": round(total_time_ms, 2),
+                "tile_api_requests": tile_api_requests,
+                "debug_image_url": debug_artifact.image_url if debug_artifact else None,
+                "debug_metadata_url": debug_artifact.metadata_url if debug_artifact else None,
+                "debug_tile_urls": debug_artifact.tile_image_urls if debug_artifact else [],
+            },
+            sort_keys=True,
+        )
+    )
+
+    return TileDetectionResponse(
+        detections=pixel_dets,
+        total_inference_time_ms=round(t_yolo + t_depth, 1),
+        stitched_width=stitch_width,
+        stitched_height=stitch_height,
+        pano_heading=pano_heading,
+        tiles_count=len(request.tiles),
+        tile_api_requests=tile_api_requests,
+        debug_artifact=debug_artifact,
+    )
 
 
 @app.post("/crop-sign-static")
@@ -933,11 +1407,11 @@ async def detect_single_pano_impl(request: SinglePanoRequest) -> DetectionPanoRe
     t_yolo = (time.time() - t_yolo_start) * 1000
     yolo_speed = yolo_results[0].speed if yolo_results else {}
 
-    # Depth estimation (only if detections found)
+    # Depth estimation (only if detections found and not skipped)
     has_dets = any(r.boxes is not None and len(r.boxes) > 0 for r in yolo_results)
     depth_tensor = None
     t_depth = 0.0
-    if has_dets:
+    if has_dets and not request.skip_depth:
         try:
             depth_start = time.time()
             depth_result = depth_model(image)
@@ -1007,6 +1481,7 @@ async def detect_single_pano_impl(request: SinglePanoRequest) -> DetectionPanoRe
                 heading=center_heading, pitch=center_pitch,
                 angular_width=ang_w, angular_height=ang_h,
                 confidence=conf, class_name=cls_name,
+                bbox_x1=x1, bbox_y1=y1, bbox_x2=x2, bbox_y2=y2,
                 depth_anything_meters=det_depth_m,
                 depth_anything_meters_raw=det_depth_m_raw,
                 inferred_panel_layout=panel_layout,
