@@ -7,7 +7,8 @@
  * Usage:
  *   GOOGLE_MAPS_API_KEY=... bun scripts/walk-panos.js \
  *     --south 37.785 --west -122.410 --north 37.790 --east -122.405 \
- *     --output calibration-walk.jsonl
+ *     --output calibration-walk.jsonl \
+ *     --min-tilt-offset 1.0
  *
  * Requires: backend running on http://127.0.0.1:8000
  */
@@ -22,6 +23,8 @@ const DETECTION_DELAY_MS = 100;
 const DETECTION_FOV = 90;
 const DETECTION_PITCH = 0;
 const DETECTION_IMG_SIZE = 640;
+const TILE_GRID_WIDTH = 16384;
+const TILE_GRID_HEIGHT = 8192;
 
 // --- CLI parsing (manual to handle negative numbers) ---
 function getArg(name, defaultVal) {
@@ -37,9 +40,10 @@ const east = parseFloat(getArg("east"));
 const outputFile = getArg("output", "calibration-walk.jsonl");
 const interval = parseFloat(getArg("interval", "50"));
 const confidence = parseFloat(getArg("confidence", "0.15"));
+const minTiltOffset = parseFloat(getArg("min-tilt-offset", "0"));
 
 if ([south, west, north, east].some(Number.isNaN)) {
-  console.error("Usage: bun scripts/walk-panos.js --south S --west W --north N --east E [--output FILE]");
+  console.error("Usage: bun scripts/walk-panos.js --south S --west W --north N --east E [--output FILE] [--min-tilt-offset N]");
   process.exit(1);
 }
 
@@ -51,6 +55,45 @@ if (!API_KEY) {
 
 function log(...args) {
   console.error(...args);
+}
+
+// --- Equirectangular projection helpers ---
+
+function headingPitchToPixelCorrected(heading, pitch, imageWidth, imageHeight, panoHeading, tilt) {
+  const deg2rad = Math.PI / 180;
+  const rad2deg = 180 / Math.PI;
+
+  const hRad = heading * deg2rad;
+  const pRad = pitch * deg2rad;
+  const cosP = Math.cos(pRad);
+  const dx = cosP * Math.sin(hRad);
+  const dy = cosP * Math.cos(hRad);
+  const dz = Math.sin(pRad);
+
+  const phRad = panoHeading * deg2rad;
+  const cosPh = Math.cos(phRad);
+  const sinPh = Math.sin(phRad);
+  const localX = dx * cosPh - dy * sinPh;
+  const localY = dx * sinPh + dy * cosPh;
+  const localZ = dz;
+
+  const alpha = (tilt - 90) * deg2rad;
+  const cosA = Math.cos(alpha);
+  const sinA = Math.sin(alpha);
+  const stabX = localX;
+  const stabY = cosA * localY + sinA * localZ;
+  const stabZ = -sinA * localY + cosA * localZ;
+
+  const stabRelHDeg = Math.atan2(stabX, stabY) * rad2deg;
+  const stabPitchDeg = Math.asin(Math.max(-1, Math.min(1, stabZ))) * rad2deg;
+
+  const x = ((stabRelHDeg + 180) / 360) * imageWidth;
+  const y = ((90 - stabPitchDeg) / 180) * imageHeight;
+
+  const yBase = ((90 - pitch) / 180) * imageHeight;
+  const yCorrection = y - yBase;
+
+  return { x, y, yCorrection };
 }
 
 // --- Google Map Tiles API helpers ---
@@ -155,6 +198,7 @@ async function detectSinglePano(panoId, heading, pitch, fov, conf) {
       api_key: API_KEY,
       img_width: DETECTION_IMG_SIZE,
       img_height: DETECTION_IMG_SIZE,
+      skip_depth: true,
     }),
   });
   if (!resp.ok) throw new Error(`Detection failed: ${resp.status} ${await resp.text()}`);
@@ -170,6 +214,9 @@ function sleep(ms) {
 async function main() {
   log(`Walking panoramas in [${south},${west}] - [${north},${east}]`);
   log(`Output: ${outputFile}, interval: ${interval}m, confidence: ${confidence}`);
+  if (minTiltOffset > 0) {
+    log(`Filtering: only panos with |tilt - 90| >= ${minTiltOffset}°`);
+  }
 
   // Check backend health
   try {
@@ -204,7 +251,6 @@ async function main() {
     const batch = allPoints.slice(i, i + PANO_BATCH_SIZE);
     const panoIds = await fetchPanoIds(batch, session);
     for (let j = 0; j < batch.length; j++) {
-      // panoIds response is an array of strings (or empty strings for no coverage)
       const id = typeof panoIds[j] === "string" ? panoIds[j] : panoIds[j]?.panoId;
       if (id) {
         if (!panoMap.has(id)) {
@@ -221,13 +267,34 @@ async function main() {
   // Initialize output file
   writeFileSync(outputFile, "");
 
-  // Walk each panorama with left + right headings
+  // Walk each panorama: fetch metadata first, filter by tilt, then detect
   let totalDetections = 0;
   let panoIndex = 0;
+  let skippedTilt = 0;
   const totalPanos = panoMap.size;
 
   for (const [panoId, point] of panoMap) {
     panoIndex++;
+
+    // Fetch metadata FIRST for tilt filtering
+    let metadata;
+    try {
+      metadata = await fetchMetadata(panoId, session);
+    } catch (e) {
+      log(`  Warning: metadata fetch failed for ${panoId}: ${e.message}`);
+      continue;
+    }
+
+    const tilt = metadata.tilt ?? 90;
+    const panoHeading = metadata.heading ?? 0;
+    const tiltOffset = Math.abs(tilt - 90);
+
+    // Filter by tilt offset
+    if (minTiltOffset > 0 && tiltOffset < minTiltOffset) {
+      skippedTilt++;
+      continue;
+    }
+
     const sides = [
       { side: "right", heading: (point.bearing + SIDE_OFFSET) % 360 },
       { side: "left", heading: (point.bearing - SIDE_OFFSET + 360) % 360 },
@@ -246,16 +313,14 @@ async function main() {
         const result = await detectSinglePano(panoId, heading, DETECTION_PITCH, DETECTION_FOV, confidence);
 
         if (result.detections && result.detections.length > 0) {
-          // Fetch metadata for tilt info
-          let metadata;
-          try {
-            metadata = await fetchMetadata(panoId, session);
-          } catch (e) {
-            log(`  Warning: metadata fetch failed for ${panoId}: ${e.message}`);
-            metadata = {};
-          }
-
           for (const det of result.detections) {
+            // Compute predicted equirect position
+            const corrected = headingPitchToPixelCorrected(
+              det.heading, det.pitch,
+              TILE_GRID_WIDTH, TILE_GRID_HEIGHT,
+              panoHeading, tilt,
+            );
+
             const record = {
               panoId,
               heading: det.heading,
@@ -266,14 +331,24 @@ async function main() {
               detectionFov: DETECTION_FOV,
               detectionPitch: DETECTION_PITCH,
               detectionHeading: heading,
-              panoHeading: metadata.heading ?? null,
-              tilt: metadata.tilt ?? null,
+              panoHeading,
+              tilt,
+              tiltOffset: parseFloat(tiltOffset.toFixed(3)),
               streetBearing: point.bearing,
               side,
               lat: point.lat,
               lon: point.lon,
               imgWidth: DETECTION_IMG_SIZE,
               imgHeight: DETECTION_IMG_SIZE,
+              // Gnomonic bbox coords (raw YOLO in 640x640)
+              bboxX1: det.bbox_x1 ?? null,
+              bboxY1: det.bbox_y1 ?? null,
+              bboxX2: det.bbox_x2 ?? null,
+              bboxY2: det.bbox_y2 ?? null,
+              // Predicted equirect position
+              predictedEqX: parseFloat(corrected.x.toFixed(1)),
+              predictedEqY: parseFloat(corrected.y.toFixed(1)),
+              yCorrection: parseFloat(corrected.yCorrection.toFixed(1)),
             };
             appendFileSync(outputFile, JSON.stringify(record) + "\n");
             totalDetections++;
@@ -287,11 +362,14 @@ async function main() {
     }
 
     if (panoIndex % 10 === 0 || panoIndex === totalPanos) {
-      log(`Progress: ${panoIndex}/${totalPanos} panos, ${totalDetections} detections so far`);
+      log(`Progress: ${panoIndex}/${totalPanos} panos, ${totalDetections} detections, ${skippedTilt} skipped (tilt)`);
     }
   }
 
   log(`Done! ${totalDetections} detections written to ${outputFile}`);
+  if (skippedTilt > 0) {
+    log(`Skipped ${skippedTilt} panos with |tilt - 90| < ${minTiltOffset}°`);
+  }
 }
 
 main().catch((e) => {
