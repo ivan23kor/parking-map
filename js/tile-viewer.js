@@ -95,6 +95,7 @@ class TileViewer {
       panoData?.location?.latLng?.lng?.() ?? metadata?.lng,
     );
     this._links = Array.isArray(panoData?.links) ? panoData.links : [];
+    this._tileCache.clear();
     this._queueRender();
     this._emit("pano_changed");
     this._emit("position_changed");
