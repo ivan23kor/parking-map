@@ -36,7 +36,7 @@ const RULE_CATEGORY_COLORS = {
   loading_zone: "#8b5cf6",
   permit_required: "#f59e0b",
 };
-const RULE_PRECEDENCE = { loading_zone: 4, permit_required: 3, no_parking: 2, parking_allowed: 1 };
+
 const TOW_ZONE_COLOR = "#dc2626";
 const RULE_CURVE_SAMPLE_STEP_METERS = 3;
 const RULE_CURVE_DEFAULT_LENGTH_METERS = 50;
@@ -2048,6 +2048,7 @@ function buildInterpretationHtml(ocrResult) {
   const towZones = ocrResult.tow_zones || [];
   if (rules.length === 0 && towZones.length === 0) return "";
 
+  const PRECEDENCE = { loading_zone: 4, permit_required: 3, no_parking: 2, parking_allowed: 1 };
   const winnerLines = [];
   const skippedLines = [];
   const towLines = [];
@@ -2061,7 +2062,7 @@ function buildInterpretationHtml(ocrResult) {
     rules.forEach((rule, idx) => {
       const ad = rule.arrow_direction;
       if (ad === dir || ad === "both") {
-        candidates.push({ rule, idx, prec: RULE_PRECEDENCE[rule.category] || 0, arrow: ad });
+        candidates.push({ rule, idx, prec: PRECEDENCE[rule.category] || 0, arrow: ad });
       } else {
         // Deduplicate: rules with no arrow get one line, not two
         const key = (!ad || ad === "none") ? `${idx}:no-arrow` : `${idx}:${dir}`;
