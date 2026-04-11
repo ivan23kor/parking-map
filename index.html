@@ -1635,6 +1635,7 @@
           ${rulesHtml || "<div style='color: #9ca3af; font-size: 11px;'>No rules extracted</div>"}
           ${towZonesHtml ? `<div style="margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.2);">${towZonesHtml}</div>` : ""}
           ${ocrResult.raw_text ? `<details style="margin-top: 6px;"><summary style="cursor: pointer; color: #9ca3af; font-size: 10px;">Raw text</summary><pre style="margin: 4px 0 0; font-size: 9px; white-space: pre-wrap; color: #d1d5db; word-wrap: break-word;">${ocrResult.raw_text}</pre></details>` : ""}
+          ${buildInterpretationHtml(ocrResult)}
         `;
       }
 

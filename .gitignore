@@ -51,5 +51,8 @@ evals/runs/
 # Benchmark crops and results
 benchmark/
 
+# Debug tile detection output
+debug_detect_tiles/
+
 # OSM streets database (>100MB, download separately)
 backend/data/streets.db
