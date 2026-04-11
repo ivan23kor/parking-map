@@ -444,9 +444,26 @@
 
         const existingDetection = store.detections.find((d) => sameDetection(d));
         const newSigns = detectionEntry.signs || [];
-        const mergedSigns = existingDetection?.signs?.length
-          ? [...newSigns, ...existingDetection.signs]
-          : newSigns;
+        // Merge by UUID: new signs win, but inherit missing fields from existing
+        let mergedSigns;
+        if (existingDetection?.signs?.length) {
+          const byUuid = new Map();
+          for (const s of existingDetection.signs) {
+            if (s.uuid) byUuid.set(s.uuid, s);
+          }
+          mergedSigns = newSigns.map(s => {
+            const existing = s.uuid && byUuid.get(s.uuid);
+            if (!existing) return s;
+            byUuid.delete(s.uuid);
+            return { ...existing, ...s };
+          });
+          // Append any existing signs not present in newSigns
+          for (const leftover of byUuid.values()) {
+            mergedSigns.push(leftover);
+          }
+        } else {
+          mergedSigns = newSigns;
+        }
 
         const nextStore = {
           savedAt: Date.now(),
@@ -2528,6 +2545,20 @@
 
         hydrateDetectionPreviews(signLocations, detectedPanoId)
           .then(async () => {
+            // Preserve OCR results attached by ocr-complete while hydration was in-flight
+            const currentStore = getLatestSignMapData();
+            const currentDet = currentStore.detections.find(d => d.panoId === detectedPanoId);
+            if (currentDet?.signs) {
+              for (const sign of signLocations) {
+                const stored = currentDet.signs.find(s => s.uuid === sign.uuid);
+                if (stored?.ocrResult && !sign.ocrResult) {
+                  sign.ocrResult = stored.ocrResult;
+                }
+                if (stored?.ocrError && !sign.ocrError) {
+                  sign.ocrError = stored.ocrError;
+                }
+              }
+            }
             const hydratedStore = appendSignMapDetection({
               ...detectionEntry,
               signs: signLocations,

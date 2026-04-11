@@ -100,9 +100,9 @@ test('full OCR pipeline inspection', async ({ page }) => {
   });
 
   // Step 1: Load app and clear state
-  await page.goto(APP_URL, { waitUntil: 'networkidle' });
+  await page.goto(APP_URL, { waitUntil: 'domcontentloaded' });
   await page.evaluate(() => localStorage.removeItem('parksight_latest_sign_map_data'));
-  await page.reload({ waitUntil: 'networkidle' });
+  await page.reload({ waitUntil: 'domcontentloaded' });
 
   await page.screenshot({ path: path.join(OUTPUT_DIR, '01-app-loaded.png'), fullPage: true });
   report.screenshots.push('01-app-loaded.png');

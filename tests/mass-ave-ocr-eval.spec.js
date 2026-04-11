@@ -154,7 +154,7 @@ test('full OCR pipeline inspection', async ({ page }) => {
   });
 
   // Step 1: Load app
-  await page.goto(APP_URL, { waitUntil: 'networkidle' });
+  await page.goto(APP_URL, { waitUntil: 'domcontentloaded' });
 
   // Try to load capture points from app storage (set by Shift+M)
   capturePoints = await loadCapturePointsFromAppStorage(page);
@@ -169,7 +169,7 @@ test('full OCR pipeline inspection', async ({ page }) => {
   report.steps_total = 1 + capturePoints.length * 2 + 1;
 
   await page.evaluate(() => localStorage.removeItem('parksight_latest_sign_map_data'));
-  await page.reload({ waitUntil: 'networkidle' });
+  await page.reload({ waitUntil: 'domcontentloaded' });
   await page.screenshot({ path: screenshot('01-app-loaded.png'), fullPage: true });
   report.steps_completed = 1;
   writeReport();
