@@ -1949,6 +1949,8 @@ function showOcrModal(ocrResult, x, y) {
     ocrModalEl.innerHTML = `<div style="color: #f87171;">Not a parking sign</div>
       <div style="color: #9ca3af; font-size: 11px; margin-top: 4px;">${ocrResult?.rejection_reason || "Unknown"}</div>`;
   } else {
+    const interp = computeInterpretation(ocrResult);
+
     const rulesHtml = (ocrResult.rules || []).map((rule, i) => {
       const categoryColor = RULE_CATEGORY_COLORS[rule.category] || "#9ca3af";
 
@@ -1962,6 +1964,17 @@ function showOcrModal(ocrResult, x, y) {
         ? ` ${rule.arrow_direction === "left" ? "←" : rule.arrow_direction === "right" ? "→" : "↔"}`
         : "";
 
+      const ann = interp.ruleAnnotations.get(i);
+      let statusLine = "";
+      if (ann) {
+        if (ann.winsFor.length > 0) {
+          const dirs = ann.winsFor.map(d => `${formatArrow(d)} ${d.toUpperCase()}`).join(", ");
+          statusLine = `<div style="margin-top: 4px; font-size: 10px; color: #a78bfa;">winner for ${dirs} (prec=${ann.precedence})</div>`;
+        } else if (ann.skippedReason) {
+          statusLine = `<div style="margin-top: 4px; font-size: 10px; color: #6b7280;">SKIPPED — ${ann.skippedReason}</div>`;
+        }
+      }
+
       return `
         <div style="margin-bottom: 8px; padding: 8px; background: rgba(255,255,255,0.1); border-radius: 4px; border-left: 3px solid ${categoryColor};">
           <div style="font-weight: 600; color: ${categoryColor}; text-transform: uppercase; font-size: 11px;">
@@ -1972,6 +1985,7 @@ function showOcrModal(ocrResult, x, y) {
             ${timeStr} ${limitStr} ${payStr}
           </div>
           ${rule.additional_text ? `<div style="color: #9ca3af; font-size: 11px; margin-top: 2px;">${rule.additional_text}</div>` : ""}
+          ${statusLine}
         </div>
       `;
     }).join("");
@@ -1985,6 +1999,11 @@ function showOcrModal(ocrResult, x, y) {
         ? ` ${tz.arrow_direction === "left" ? "←" : tz.arrow_direction === "right" ? "→" : "↔"}`
         : "";
 
+      const towAnn = interp.towAnnotations.get(i);
+      const appliesLine = towAnn
+        ? `<div style="margin-top: 4px; font-size: 10px; color: #f87171;">applies to ${towAnn.appliesTo}</div>`
+        : "";
+
       return `
         <div style="margin-bottom: 8px; padding: 8px; background: rgba(220, 38, 38, 0.2); border-radius: 4px; border-left: 3px solid #dc2626;">
           <div style="font-weight: 600; color: #dc2626; text-transform: uppercase; font-size: 11px;">
@@ -1995,6 +2014,7 @@ function showOcrModal(ocrResult, x, y) {
             ${timeStr}
           </div>
           ${tz.additional_text ? `<div style="color: #9ca3af; font-size: 11px; margin-top: 2px;">${tz.additional_text}</div>` : ""}
+          ${appliesLine}
         </div>
       `;
     }).join("");
@@ -2006,9 +2026,8 @@ function showOcrModal(ocrResult, x, y) {
       </div>
       ${rulesHtml || "<div style='color: #9ca3af;'>No rules extracted</div>"}
       ${towZonesHtml ? `<div style="margin-top: 12px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.2);">${towZonesHtml}</div>` : ""}
-      ${ocrResult.raw_text ? `<details style="margin-top: 8px;"><summary style="cursor: pointer; color: #9ca3af; font-size: 11px;">Raw text</summary><pre style="margin: 4px 0 0; font-size: 10px; white-space: pre-wrap; color: #d1d5db;">${ocrResult.raw_text}</pre></details>` : ""}
       ${ocrResult.notes ? `<div style="margin-top: 8px; color: #fbbf24; font-size: 11px;">⚠️ ${ocrResult.notes}</div>` : ""}
-      ${buildInterpretationHtml(ocrResult)}
+      <details style="margin-top: 8px;"><summary style="cursor: pointer; color: #9ca3af; font-size: 11px;">Raw LLM output</summary><pre style="margin: 4px 0 0; font-size: 10px; white-space: pre-wrap; color: #d1d5db; word-break: break-word;">${JSON.stringify(ocrResult, null, 2)}</pre></details>
     `;
   }
 
@@ -2042,84 +2061,53 @@ function formatArrow(dir) {
   return "";
 }
 
-function buildInterpretationHtml(ocrResult) {
-  if (!ocrResult || !ocrResult.is_parking_sign) return "";
+/**
+ * Compute per-rule and per-tow-zone interpretation annotations.
+ * Returns { ruleAnnotations: Map<idx, {winsFor, skippedReason, precedence}>, towAnnotations: Map<idx, {appliesTo}> }
+ */
+function computeInterpretation(ocrResult) {
+  const PRECEDENCE = { loading_zone: 4, permit_required: 3, no_parking: 2, parking_allowed: 1 };
   const rules = ocrResult.rules || [];
   const towZones = ocrResult.tow_zones || [];
-  if (rules.length === 0 && towZones.length === 0) return "";
 
-  const PRECEDENCE = { loading_zone: 4, permit_required: 3, no_parking: 2, parking_allowed: 1 };
-  const winnerLines = [];
-  const skippedLines = [];
-  const towLines = [];
-  const mapLines = [];
-
-  // Track which skipped entries we've already emitted to avoid duplicates
-  const skippedSeen = new Set();
+  // Init annotations
+  const ruleAnnotations = new Map();
+  rules.forEach((_, i) => ruleAnnotations.set(i, { winsFor: [], skippedReason: null, precedence: PRECEDENCE[rules[i].category] || 0 }));
 
   for (const dir of ["left", "right"]) {
     const candidates = [];
     rules.forEach((rule, idx) => {
       const ad = rule.arrow_direction;
       if (ad === dir || ad === "both") {
-        candidates.push({ rule, idx, prec: PRECEDENCE[rule.category] || 0, arrow: ad });
+        candidates.push({ idx, prec: PRECEDENCE[rule.category] || 0 });
       } else {
-        // Deduplicate: rules with no arrow get one line, not two
-        const key = (!ad || ad === "none") ? `${idx}:no-arrow` : `${idx}:${dir}`;
-        if (skippedSeen.has(key)) return;
-        skippedSeen.add(key);
-        const reason = (!ad || ad === "none")
-          ? "no arrow direction \u2014 excluded from both sides"
-          : `arrow points ${ad} only`;
-        skippedLines.push(`Rule ${idx}: ${rule.category} ${formatArrow(ad)} \u2014 SKIPPED for ${dir.toUpperCase()} (${reason})`);
+        const ann = ruleAnnotations.get(idx);
+        if (!ann.skippedReason) {
+          ann.skippedReason = (!ad || ad === "none")
+            ? "no arrow direction"
+            : `arrow points ${ad} only`;
+        }
       }
     });
 
-    if (candidates.length === 0) {
-      winnerLines.push(`${formatArrow(dir)} ${dir.toUpperCase()}: no rule (no rules with ${dir}/both arrow)`);
-    } else {
+    if (candidates.length > 0) {
       candidates.sort((a, b) => b.prec - a.prec);
-      const w = candidates[0];
-      const override = candidates.length > 1
-        ? `, overrides ${candidates.slice(1).map(c => `${c.rule.category}(prec=${c.prec})`).join(", ")}`
-        : " (only candidate)";
-      winnerLines.push(`${formatArrow(dir)} ${dir.toUpperCase()}: ${w.rule.category} (prec=${w.prec}${override})`);
-      const color = RULE_CATEGORY_COLORS[w.rule.category] || "#9ca3af";
-      mapLines.push(`${formatArrow(dir)} ${dir.toUpperCase()}: ${w.rule.category}`);
+      ruleAnnotations.get(candidates[0].idx).winsFor.push(dir);
     }
   }
 
-  towZones.forEach((tz, idx) => {
+  const towAnnotations = new Map();
+  towZones.forEach((tz, i) => {
     const ad = tz.arrow_direction;
-    const appliesTo = (!ad || ad === "none" || ad === "both")
-      ? "LEFT, RIGHT"
-      : ad.toUpperCase();
-    towLines.push(`TOW ZONE ${formatArrow(ad)} [${idx}] \u2014 applies to ${appliesTo}`);
+    const appliesTo = (!ad || ad === "none" || ad === "both") ? "LEFT, RIGHT" : ad.toUpperCase();
+    towAnnotations.set(i, { appliesTo });
   });
 
-  const mono = "font-family:monospace;font-size:10px;line-height:1.6;word-break:break-word;";
-  const label = "color:#9ca3af;font-size:9px;text-transform:uppercase;letter-spacing:0.3px;";
-
-  return `<div style="margin-top:10px;padding-top:8px;border-top:1px dashed rgba(255,255,255,0.3);">
-    <div style="font-weight:600;font-size:10px;color:#a78bfa;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;">Algorithm Interpretation</div>
-    <div style="${mono}color:#d1d5db;">
-      <div style="${label}">Direction Winners</div>
-      ${winnerLines.map(l => `<div>${l}</div>`).join("")}
-    </div>
-    ${skippedLines.length ? `<div style="${mono}color:#6b7280;margin-top:4px;">
-      <div style="${label}">Skipped Rules</div>
-      ${skippedLines.map(l => `<div>${l}</div>`).join("")}
-    </div>` : ""}
-    ${towLines.length ? `<div style="${mono}margin-top:4px;">
-      <div style="${label}">Tow Zones</div>
-      ${towLines.map(l => `<div>${l}</div>`).join("")}
-    </div>` : ""}
-    ${mapLines.length ? `<div style="${mono}font-weight:600;margin-top:4px;">
-      <div style="${label}">Map Drawing</div>
-      ${mapLines.map(l => `<div>${l}</div>`).join("")}
-    </div>` : ""}
-  </div>`;
+  return { ruleAnnotations, towAnnotations };
 }
+
+/** @deprecated kept as no-op for any stale call sites */
+function buildInterpretationHtml() { return ""; }
 
 /**
  * Run OCR once on the entire sign cluster after YOLO finishes.

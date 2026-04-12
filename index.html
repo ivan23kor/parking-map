@@ -1581,7 +1581,9 @@
           return `<div class="preview-error">${ocrResult?.rejection_reason || "Not a parking sign"}</div>`;
         }
 
-        const rulesHtml = (ocrResult.rules || []).map((rule) => {
+        const interp = computeInterpretation(ocrResult);
+
+        const rulesHtml = (ocrResult.rules || []).map((rule, i) => {
           const daysStr = rule.days ? rule.days.map(d => d.toUpperCase()).join(", ") : "Any day";
           const timeStr = rule.time_start && rule.time_end
             ? `${rule.time_start}–${rule.time_end}`
@@ -1593,6 +1595,17 @@
             : "";
 
           const categoryColor = RULE_CATEGORY_COLORS[rule.category] || "#9ca3af";
+          const ann = interp.ruleAnnotations.get(i);
+          let statusLine = "";
+          if (ann) {
+            if (ann.winsFor.length > 0) {
+              const dirs = ann.winsFor.map(d => `${formatArrow(d)} ${d.toUpperCase()}`).join(", ");
+              statusLine = `<div style="margin-top: 2px; font-size: 9px; color: #a78bfa;">winner for ${dirs} (prec=${ann.precedence})</div>`;
+            } else if (ann.skippedReason) {
+              statusLine = `<div style="margin-top: 2px; font-size: 9px; color: #6b7280;">SKIPPED — ${ann.skippedReason}</div>`;
+            }
+          }
+
           return `
             <div style="margin-bottom: 6px; padding: 6px; background: rgba(255,255,255,0.1); border-radius: 4px; border-left: 3px solid ${categoryColor};">
               <div style="font-weight: 600; color: ${categoryColor}; text-transform: uppercase; font-size: 10px;">
@@ -1603,17 +1616,23 @@
                 ${timeStr} ${limitStr} ${payStr}
               </div>
               ${rule.additional_text ? `<div style="color: #9ca3af; font-size: 10px; margin-top: 2px;">${rule.additional_text}</div>` : ""}
+              ${statusLine}
             </div>
           `;
         }).join("");
 
-        const towZonesHtml = (ocrResult.tow_zones || []).map((tz) => {
+        const towZonesHtml = (ocrResult.tow_zones || []).map((tz, i) => {
           const daysStr = tz.days ? tz.days.map(d => d.toUpperCase()).join(", ") : "Any day";
           const timeStr = tz.time_start && tz.time_end
             ? `${tz.time_start}–${tz.time_end}`
             : "Any time";
           const arrowStr = tz.arrow_direction && tz.arrow_direction !== "none"
             ? ` ${tz.arrow_direction === "left" ? "←" : tz.arrow_direction === "right" ? "→" : "↔"}`
+            : "";
+
+          const towAnn = interp.towAnnotations.get(i);
+          const appliesLine = towAnn
+            ? `<div style="margin-top: 2px; font-size: 9px; color: #f87171;">applies to ${towAnn.appliesTo}</div>`
             : "";
 
           return `
@@ -1626,6 +1645,7 @@
                 ${timeStr}
               </div>
               ${tz.additional_text ? `<div style="color: #9ca3af; font-size: 10px; margin-top: 2px;">${tz.additional_text}</div>` : ""}
+              ${appliesLine}
             </div>
           `;
         }).join("");
@@ -1634,8 +1654,8 @@
           <div style="font-weight: 600; margin-bottom: 6px; font-size: 12px;">Parking Rules</div>
           ${rulesHtml || "<div style='color: #9ca3af; font-size: 11px;'>No rules extracted</div>"}
           ${towZonesHtml ? `<div style="margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.2);">${towZonesHtml}</div>` : ""}
-          ${ocrResult.raw_text ? `<details style="margin-top: 6px;"><summary style="cursor: pointer; color: #9ca3af; font-size: 10px;">Raw text</summary><pre style="margin: 4px 0 0; font-size: 9px; white-space: pre-wrap; color: #d1d5db; word-wrap: break-word;">${ocrResult.raw_text}</pre></details>` : ""}
-          ${buildInterpretationHtml(ocrResult)}
+          ${ocrResult.notes ? `<div style="margin-top: 6px; color: #fbbf24; font-size: 10px;">⚠️ ${ocrResult.notes}</div>` : ""}
+          <details style="margin-top: 6px;"><summary style="cursor: pointer; color: #9ca3af; font-size: 10px;">Raw LLM output</summary><pre style="margin: 4px 0 0; font-size: 9px; white-space: pre-wrap; color: #d1d5db; word-break: break-word;">${JSON.stringify(ocrResult, null, 2)}</pre></details>
         `;
       }
 
