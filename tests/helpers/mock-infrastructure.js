@@ -21,15 +21,19 @@ const LEAFLET_STUB = `
     addTo() { return this; }
     clearLayers() { this._layers = []; return this; }
     addLayer(layer) { this._layers.push(layer); return this; }
+    removeLayer(layer) { const i = this._layers.indexOf(layer); if (i >= 0) this._layers.splice(i, 1); return this; }
     eachLayer(fn) { this._layers.forEach(fn); return this; }
   }
   function makeLayer(latlng, options = {}) {
     return {
       _latlng: latlng, options,
       addTo(group) { if (group && typeof group.addLayer === "function") group.addLayer(this); return this; },
+      remove() { return this; },
       bindPopup() { return this; }, bindTooltip() { return this; }, on() { return this; }, openPopup() { return this; }, getPopup() { return null; },
       setLatLng(next) { this._latlng = next; return this; },
       setBounds(bounds) { this._bounds = bounds; return this; },
+      setLatLngs(pts) { this._latlngs = pts; return this; },
+      setStyle(opts) { Object.assign(this.options, opts); return this; },
     };
   }
   const mapHandlers = {};
@@ -51,10 +55,12 @@ const LEAFLET_STUB = `
     },
     getZoom() { return this._zoom; }, getCenter() { return this._center; },
     invalidateSize() {}, fitBounds(b) { this._fitBounds = b; },
-    on(event, handler) { mapHandlers[event] = handler; return this; },
+    on(event, handler) { if (!mapHandlers[event]) mapHandlers[event] = []; mapHandlers[event].push(handler); return this; },
+    fire(event, data) { (mapHandlers[event] || []).forEach(h => h(data)); return this; },
     getContainer() { return document.getElementById("map"); },
     closePopup() { return this; },
     dragging: { enable() {}, disable() {} }, doubleClickZoom: { enable() {}, disable() {} },
+    boxZoom: { enable() {}, disable() {} },
   };
   window.L = {
     map() { return map; },
@@ -62,9 +68,18 @@ const LEAFLET_STUB = `
     layerGroup() { return new LayerGroup(); },
     circle(latlng, options) { return makeLayer(latlng, options); },
     circleMarker(latlng, options) { return makeLayer(latlng, options); },
-    polyline(latlngs, options) { const l = makeLayer(latlngs[0], options); l._latlngs = latlngs; return l; },
+    polyline(latlngs, options) { const l = makeLayer(latlngs && latlngs[0], options); l._latlngs = latlngs || []; return l; },
+    polygon(latlngs, options) { const l = makeLayer(latlngs && latlngs[0], options); l._latlngs = latlngs || []; return l; },
     rectangle(bounds, options) { const l = makeLayer(bounds[0], options); l.setBounds = function(n) { this._bounds = n; return this; }; return l; },
-    latLngBounds(points) { return points; },
+    latLngBounds(sw, ne) {
+      const arr = Array.isArray(sw) ? sw : [sw, ne];
+      return {
+        getSouth: () => Math.min(...arr.map(p => Array.isArray(p) ? p[0] : p.lat)),
+        getNorth: () => Math.max(...arr.map(p => Array.isArray(p) ? p[0] : p.lat)),
+        getWest: () => Math.min(...arr.map(p => Array.isArray(p) ? p[1] : p.lng)),
+        getEast: () => Math.max(...arr.map(p => Array.isArray(p) ? p[1] : p.lng)),
+      };
+    },
   };
 })();
 `;
@@ -101,18 +116,51 @@ const GOOGLE_MAPS_STUB = `
 
 const TURF_STUB = `
 window.turf = {
-  point(coords) { return { coords }; },
+  point(coords) { return { type: "Feature", geometry: { type: "Point", coordinates: coords } }; },
   bearing(start, end) {
-    const avgLat = (start.coords[1] + end.coords[1]) / 2;
-    const dx = (end.coords[0] - start.coords[0]) * 111320 * Math.cos((avgLat * Math.PI) / 180);
-    const dy = (end.coords[1] - start.coords[1]) * 111320;
+    const s = start.geometry ? start.geometry.coordinates : start.coords;
+    const e = end.geometry ? end.geometry.coordinates : end.coords;
+    const avgLat = (s[1] + e[1]) / 2;
+    const dx = (e[0] - s[0]) * 111320 * Math.cos((avgLat * Math.PI) / 180);
+    const dy = (e[1] - s[1]) * 111320;
     return (Math.atan2(dx, dy) * 180) / Math.PI;
   },
   distance(start, end) {
-    const avgLat = (start.coords[1] + end.coords[1]) / 2;
-    const dx = (end.coords[0] - start.coords[0]) * 111320 * Math.cos((avgLat * Math.PI) / 180);
-    const dy = (end.coords[1] - end.coords[1]) * 111320;
+    const s = start.geometry ? start.geometry.coordinates : start.coords;
+    const e = end.geometry ? end.geometry.coordinates : end.coords;
+    const avgLat = (s[1] + e[1]) / 2;
+    const dx = (e[0] - s[0]) * 111320 * Math.cos((avgLat * Math.PI) / 180);
+    const dy = (e[1] - s[1]) * 111320;
     return Math.sqrt(dx * dx + dy * dy);
+  },
+  polygon(rings) {
+    return { type: "Feature", geometry: { type: "Polygon", coordinates: rings } };
+  },
+  booleanPointInPolygon(pt, poly) {
+    const p = pt.geometry ? pt.geometry.coordinates : pt.coords;
+    const ring = poly.geometry ? poly.geometry.coordinates[0] : poly.coordinates[0];
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+      if ((yi > p[1]) !== (yj > p[1]) && p[0] < (xj - xi) * (p[1] - yi) / (yj - yi) + xi) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  },
+  bbox(feature) {
+    const coords = feature.geometry.coordinates[0];
+    const lngs = coords.map(c => c[0]), lats = coords.map(c => c[1]);
+    return [Math.min(...lngs), Math.min(...lats), Math.max(...lngs), Math.max(...lats)];
+  },
+  area(feature) {
+    const ring = feature.geometry.coordinates[0];
+    let a = 0;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      a += ring[i][0] * ring[j][1] - ring[j][0] * ring[i][1];
+    }
+    const avgLat = ring.reduce((s, c) => s + c[1], 0) / ring.length;
+    return Math.abs(a) * 0.5 * 111320 * 111320 * Math.cos(avgLat * Math.PI / 180);
   },
   lineString(coordinates) { return { geometry: { type: "LineString", coordinates } }; },
   bboxClip(line) { return line; },

@@ -190,6 +190,54 @@
         z-index: 101;
       }
 
+      #scanAreaBtn {
+        position: absolute;
+        right: 10px;
+        bottom: 46px;
+        z-index: 1000;
+        background: rgba(59, 130, 246, 0.94);
+        color: #fff;
+        padding: 10px 14px;
+        border-radius: 6px;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+        font-size: 13px;
+        line-height: 1;
+        border: none;
+        cursor: pointer;
+      }
+
+      #scanAreaBtn:hover {
+        background: rgba(59, 130, 246, 1);
+      }
+
+      #scanAreaBtn.active {
+        background: rgba(220, 38, 38, 0.9);
+      }
+
+      #scanAreaStatus {
+        position: absolute;
+        right: 10px;
+        bottom: 86px;
+        z-index: 1000;
+        background: rgba(0, 0, 0, 0.8);
+        color: #e5e7eb;
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-size: 12px;
+        line-height: 1.3;
+        display: none;
+        max-width: 280px;
+        pointer-events: none;
+      }
+
+      .area-scan-drawing #map {
+        cursor: crosshair !important;
+      }
+
+      .area-scan-drawing .leaflet-container {
+        cursor: crosshair !important;
+      }
+
       #clearProjectedSignsBtn {
         position: absolute;
         right: 10px;
@@ -296,6 +344,8 @@
 
       <section id="mapPane" aria-label="Map view">
         <div id="map"></div>
+        <div id="scanAreaStatus"></div>
+        <button id="scanAreaBtn" type="button">Scan area</button>
         <button id="clearProjectedSignsBtn" type="button">
           Clear projected signs
         </button>
@@ -318,6 +368,7 @@
     <script src="js/tile-viewer.js"></script>
     <script src="js/signRegistry.js"></script>
     <script src="js/detection.js"></script>
+    <script src="js/area-scan.js"></script>
 
     <!-- Google Maps API (loaded after config.js so we have the API key) -->
     <script>
@@ -344,6 +395,7 @@
       let panoramaCaptureSpotsLayer;
       let panoNetworkLayer;
       let headingArrowLayer;
+      let scanAreaLayer;
       let panoNetworkSyncToken = 0;
       let isPanoramaBlackoutEnabled = false;
       let panoramaCaptureSpotsSyncToken = 0;
@@ -2106,12 +2158,16 @@
         panoNetworkLayer = L.layerGroup().addTo(map);
         headingArrowLayer = L.layerGroup().addTo(map);
         debugMapLayer = L.layerGroup().addTo(map);
+        scanAreaLayer = L.layerGroup().addTo(map);
 
         // Debug overlay keyboard shortcut (Shift+D)
+        // Area scan toggle (bare D)
         document.addEventListener("keydown", (e) => {
           if (e.shiftKey && e.key === "D") {
             e.preventDefault();
             toggleDebugOverlays();
+          } else if (!e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && e.key === "d" && !["INPUT","TEXTAREA","SELECT"].includes(e.target.tagName)) {
+            if (typeof toggleAreaScanMode === "function") toggleAreaScanMode();
           }
         });
 
@@ -2245,8 +2301,17 @@
           .getElementById("clearProjectedSignsBtn")
           .addEventListener("click", clearProjectedSigns);
 
+        // Area scan
+        document
+          .getElementById("scanAreaBtn")
+          .addEventListener("click", () => {
+            if (typeof toggleAreaScanMode === "function") toggleAreaScanMode();
+          });
+        if (typeof initAreaScan === "function") initAreaScan();
+
         // Click map to open closest panorama
         map.on("click", async (e) => {
+          if (typeof areaScanState !== "undefined" && areaScanState.drawing) return;
           const clickLat = e.latlng.lat;
           const clickLng = e.latlng.lng;
 
