@@ -568,14 +568,17 @@ function _promoteMarker(panoId, status) {
   const entry = state.discoveredPanos.get(panoId);
   if (!entry || !entry.marker) return;
 
-  const colors = {
-    processed: { color: "#3b82f6", fillColor: "#60a5fa", fillOpacity: 0.6 },
-    cached:    { color: "#22c55e", fillColor: "#86efac", fillOpacity: 0.6 },
-    empty:     { color: "#6b7280", fillColor: "#9ca3af", fillOpacity: 0.4 },
-    error:     { color: "#ef4444", fillColor: "#fca5a5", fillOpacity: 0.5 },
-  };
-  const style = colors[status] || colors.processed;
-  entry.marker.setStyle(style);
+  if (status === "processed" || status === "cached") {
+    // signMarkersLayer renders the final dot via renderSignMapData — remove this duplicate
+    entry.marker.remove();
+    entry.marker = null;
+  } else {
+    const colors = {
+      empty: { color: "#6b7280", fillColor: "#9ca3af", fillOpacity: 0.4 },
+      error: { color: "#ef4444", fillColor: "#fca5a5", fillOpacity: 0.5 },
+    };
+    entry.marker.setStyle(colors[status] || colors.empty);
+  }
   entry.status = status;
 }
 
