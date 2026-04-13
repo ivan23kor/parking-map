@@ -450,6 +450,11 @@ async function _processPano(panoId) {
     const camLat = meta?.lat ?? entry.lat;
     const camLng = meta?.lng ?? entry.lng;
 
+    // Snap marker to metadata coords (Tile API position is road-corrected)
+    if (entry.marker && meta?.lat != null && meta?.lng != null) {
+      entry.marker.setLatLng([camLat, camLng]);
+    }
+
     // 2. Road context (direct call to avoid mutating currentDetectionContext)
     const allWays = state.allWays;
     const streetCtx = await fetchNearestStreetContext(camLat, camLng, allWays, 120, null);
