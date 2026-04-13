@@ -689,9 +689,6 @@
           opacity: 0.95,
           fillOpacity: 0.85,
         }).addTo(panoramaCaptureSpotsLayer);
-        currentMarker.bindPopup(
-          `<b>Current panorama</b><br>Pano: ${currentSpot.panoId || "unknown"}`,
-        );
 
         for (const spot of linkedSpots || []) {
           if (!Number.isFinite(spot.lat) || !Number.isFinite(spot.lng) || !spot.panoId) {
@@ -1254,12 +1251,13 @@
             : 0;
           totalSigns += signCount;
 
-          cameraCircle.bindPopup(
-            `<b>Panorama point</b><br>` +
-              `Run: ${detectionIndex + 1}<br>` +
-              `Pano: ${detection.panoId || "unknown"}<br>` +
-              `Projected signs: ${signCount}`,
-          );
+          cameraCircle.on("click", () => {
+            currentDetectionContext = buildPanoramaNavigationContext(
+              detection.panoId,
+              detection.heading,
+            );
+            initPanoramaForContext();
+          });
 
           for (const sign of detection.signs || []) {
             if (sign.ocrResult && sign.ocrResult.is_parking_sign === false) continue;
