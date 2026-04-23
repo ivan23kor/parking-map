@@ -263,10 +263,10 @@ async function mockInfrastructure(page, options = {}) {
   // Overpass API stub (uses fixture data or empty)
   await page.route("https://overpass-api.de/api/interpreter", (r) => r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ elements: fixtureWays }) }));
   // Also stub the local backend /streets endpoint
-  await page.route("http://127.0.0.1:8000/streets?**", (r) => r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(fixtureWays) }));
+  await page.route("**/api/streets?**", (r) => r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(fixtureWays) }));
 
   // Backend detection endpoints
-  await page.route("http://127.0.0.1:8000/detect-tiles", async (r) => {
+  await page.route("**/api/detect-tiles", async (r) => {
     if (detectTilesResponse) {
       const resp = typeof detectTilesResponse === "function" ? detectTilesResponse(r.request()) : detectTilesResponse;
       await r.fulfill({ status: resp.status ?? 200, contentType: "application/json", body: resp.body ?? JSON.stringify(resp) });
@@ -275,21 +275,21 @@ async function mockInfrastructure(page, options = {}) {
     const resp = typeof detectPanoramaResponse === "function" ? detectPanoramaResponse(r.request()) : detectPanoramaResponse;
     await r.fulfill({ status: resp.status, contentType: resp.contentType || "application/json", body: resp.body });
   });
-  await page.route("http://127.0.0.1:8000/detect", async (r) => {
+  await page.route("**/api/detect", async (r) => {
     const resp = typeof detectResponse === "function" ? detectResponse(r.request()) : detectResponse;
     await r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(resp) });
   });
-  await page.route("http://127.0.0.1:8000/crop-sign-tiles", async (r) => {
+  await page.route("**/api/crop-sign-tiles", async (r) => {
     const resp = typeof cropResponse === "function" ? cropResponse(r.request()) : cropResponse;
     await r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(resp) });
   });
-  await page.route("http://127.0.0.1:8000/ocr-sign", async (r) => {
+  await page.route("**/api/ocr-sign", async (r) => {
     const resp = typeof ocrResponse === "function" ? ocrResponse(r.request()) : ocrResponse;
     await r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(resp) });
   });
 
   // Backend health
-  await page.route("http://127.0.0.1:8000/health", (r) => r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "ok" }) }));
+  await page.route("**/api/health", (r) => r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ status: "ok" }) }));
 }
 
 module.exports = {

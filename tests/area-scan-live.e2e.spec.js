@@ -68,7 +68,7 @@ test.describe(
       });
 
       // -- step 1: check backend --
-      const healthResp = await page.request.get("http://127.0.0.1:8000/health");
+      const healthResp = await page.request.get("http://127.0.0.1:8080/api/health");
       expect(healthResp.ok()).toBe(true);
 
       // -- step 2: load app --
