@@ -10,10 +10,17 @@
  */
 async function fetchStreets(bounds) {
     const apiUrl = window.DETECTION_CONFIG?.API_URL;
-    const response = await fetch(
-        `${apiUrl}/streets?south=${bounds.getSouth()}&west=${bounds.getWest()}&north=${bounds.getNorth()}&east=${bounds.getEast()}`
-    );
+    const url = `${apiUrl}/streets?south=${bounds.getSouth()}&west=${bounds.getWest()}&north=${bounds.getNorth()}&east=${bounds.getEast()}`;
+    const t0 = performance.now();
+    let response;
+    try {
+        response = await fetch(url);
+    } catch (err) {
+        log.error(`[streets] network error ${url} elapsed=${(performance.now() - t0).toFixed(0)}ms`, err);
+        throw err;
+    }
     if (!response.ok) {
+        log.error(`[streets] http ${response.status} ${url}`);
         throw new Error(`Streets API error: ${response.status}`);
     }
     return response.json();
