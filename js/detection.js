@@ -652,7 +652,7 @@ async function runDetection(imageUrl, confidence = null) {
       }),
     });
   } catch (err) {
-    console.error("Detection request failed:", err);
+    log.error("Detection request failed:", err);
     throw new Error(`Can't reach detection API. Make sure backend is running.`);
   }
 
@@ -1318,7 +1318,7 @@ function updateDetectionOverlay() {
           height
         );
       } catch (e) {
-        console.warn("drawOcrTextOnOverlay failed:", e);
+        log.warn("drawOcrTextOnOverlay failed:", e);
       }
     }
 
@@ -1516,7 +1516,7 @@ function requestPanoramaLinkSpotPosition(currentPanoId, link) {
       cachePanoramaLinkSpotPosition(currentPanoId, link.pano, { lat, lng });
     })
     .catch((err) => {
-      console.warn("Failed to resolve linked panorama position:", err);
+      log.warn("Failed to resolve linked panorama position:", err);
     })
     .finally(() => {
       panoramaLinkSpotRequestsInFlight.delete(key);
@@ -1534,7 +1534,7 @@ function initDetectionPanorama(panoId, heading, container) {
 
   if (detectionPanorama) {
     Promise.resolve(detectionPanorama.setPano(panoId)).catch((err) => {
-      console.error("Failed to update tile panorama:", err);
+      log.error("Failed to update tile panorama:", err);
     });
     detectionPanorama.setPov(pov);
   } else {
@@ -1576,7 +1576,7 @@ function initDetectionPanorama(panoId, heading, container) {
         clearDetections();
         if (typeof syncPanoramaCaptureSpotsOnMap === "function") {
           Promise.resolve(syncPanoramaCaptureSpotsOnMap()).catch((err) => {
-            console.warn("Failed to sync panorama spots after pano change:", err);
+            log.warn("Failed to sync panorama spots after pano change:", err);
           });
         }
         if (typeof updateHeadingArrowOnMap === "function") {
@@ -1590,7 +1590,7 @@ function initDetectionPanorama(panoId, heading, container) {
         updateDetectionOverlay();
         if (typeof syncPanoramaCaptureSpotsOnMap === "function") {
           Promise.resolve(syncPanoramaCaptureSpotsOnMap()).catch((err) => {
-            console.warn("Failed to sync panorama spots after position change:", err);
+            log.warn("Failed to sync panorama spots after position change:", err);
           });
         }
         if (typeof updateHeadingArrowOnMap === "function") {
@@ -1613,7 +1613,7 @@ function initDetectionPanorama(panoId, heading, container) {
   }
 
   Promise.resolve(detectionPanorama.setPano?.(panoId)).catch((err) => {
-    console.error("Failed to set tile panorama:", err);
+    log.error("Failed to set tile panorama:", err);
   });
   detectionPanorama.setPov(pov);
   currentDetections = [];
@@ -1750,7 +1750,7 @@ async function runSinglePanoApiDetection(panoId, heading, pitch, fov, statusEl) 
     }
   }
 
-  console.log('[DETECT-TILES-REQ]', JSON.stringify({
+  log.log('[DETECT-TILES-REQ]', JSON.stringify({
     panoId, heading, pitch, fov, panoHeading,
     centerPx: { x: center.x?.toFixed(1), y: center.y?.toFixed(1) },
     tileRange: { minX: minTileX, maxX: maxTileX, minY: minTileY, maxY: maxTileY },
@@ -1784,7 +1784,7 @@ async function runSinglePanoApiDetection(panoId, heading, pitch, fov, statusEl) 
       }),
     });
   } catch (err) {
-    console.error("Tile detection request failed:", err);
+    log.error("Tile detection request failed:", err);
     throw new Error("Can't reach detection API. Make sure backend is running.");
   }
 
@@ -1811,9 +1811,9 @@ async function runSinglePanoApiDetection(panoId, heading, pitch, fov, statusEl) 
     },
     viewport: { width: canvasWidth, height: canvasHeight },
   };
-  console.info("[detect-tiles] usage", usageSummary);
+  log.info("[detect-tiles] usage", usageSummary);
   if (result?.debug_artifact) {
-    console.info("[detect-tiles] debug artifact", {
+    log.info("[detect-tiles] debug artifact", {
       ...usageSummary,
       stitchedImageUrl: result.debug_artifact.image_url,
       metadataUrl: result.debug_artifact.metadata_url,
@@ -1896,7 +1896,7 @@ async function runDetectionOnPanorama(
 
     return result;
   } catch (err) {
-    console.error("Detection error:", err);
+    log.error("Detection error:", err);
     if (statusEl) statusEl.textContent = `Detection failed: ${err.message}`;
     throw err;
   }
@@ -2146,13 +2146,13 @@ async function runOcrOnDetections(panoId, camLat, camLng, detections) {
       });
 
       if (!cropResp.ok) {
-        console.warn(`OCR [${i}]: failed to crop sign cluster`);
+        log.warn(`OCR [${i}]: failed to crop sign cluster`);
         throw new Error("Failed to crop sign cluster");
       }
 
       const cropData = await cropResp.json();
       if (!cropData.image_base64) {
-        console.warn(`OCR [${i}]: no image for sign cluster`);
+        log.warn(`OCR [${i}]: no image for sign cluster`);
         throw new Error("No image returned for sign cluster");
       }
 
@@ -2164,13 +2164,13 @@ async function runOcrOnDetections(panoId, camLat, camLng, detections) {
 
       if (!ocrResp.ok) {
         const errBody = await ocrResp.text();
-        console.warn(`OCR [${i}]: ${ocrResp.status} ${errBody}`);
+        log.warn(`OCR [${i}]: ${ocrResp.status} ${errBody}`);
         throw new Error(`OCR request failed: ${ocrResp.status} ${errBody}`);
       }
 
       const ocrResult = await ocrResp.json();
       det.ocrResult = ocrResult;
-      console.log('[OCR-RESULT]', JSON.stringify({
+      log.log('[OCR-RESULT]', JSON.stringify({
         panoId, detIndex: i, cropStatus: cropResp.status, ocrStatus: ocrResp.status,
         isParkingSign: ocrResult?.is_parking_sign, ocrRules: ocrResult?.rules?.length ?? 0,
       }));
@@ -2181,8 +2181,8 @@ async function runOcrOnDetections(panoId, camLat, camLng, detections) {
         det.uuid = crypto.randomUUID();
       }
     } catch (err) {
-      console.warn(`OCR error [${i}]:`, err);
-      console.error('[OCR-ERROR]', JSON.stringify({ panoId, detIndex: i, error: err.message }));
+      log.warn(`OCR error [${i}]:`, err);
+      log.error('[OCR-ERROR]', JSON.stringify({ panoId, detIndex: i, error: err.message }));
       det.ocrResult = { is_parking_sign: false, rejection_reason: `OCR failed: ${err.message}` };
       det.ocrError = `OCR failed: ${err.message}`;
     }
@@ -2271,7 +2271,7 @@ async function cropAndSaveSign(det, cropCenterOverride = null) {
         : "Saved tile crop";
     }
   } catch (err) {
-    console.error("Save error:", err);
+    log.error("Save error:", err);
     if (statusEl) statusEl.textContent = `Save failed: ${err.message}`;
   }
 }
@@ -2339,7 +2339,7 @@ async function buildDetectionCropPlan(det, panoId, cropCenterOverride = null) {
     CROP_PADDING_Y,
   );
 
-  console.log('[CROP-DIAG]', JSON.stringify({
+  log.log('[CROP-DIAG]', JSON.stringify({
     panoId,
     det: { heading: det.heading, pitch: det.pitch, angW: det.angularWidth, angH: det.angularHeight },
     meta: { panoHeading, tilt, metaImgW: metadata.imageWidth, metaImgH: metadata.imageHeight },
@@ -3722,7 +3722,7 @@ function estimateSignLocation(
       : null;
 
   if (distance == null) {
-    console.error(
+    log.error(
       `[estimateSignLocation] heading=${detection.heading.toFixed(1)}° - depth-anything not available, skipping detection`,
     );
     return null;
@@ -3809,7 +3809,7 @@ const DEBUG_RING_AZIMUTH_STEP = 5;
 
 function toggleDebugOverlays() {
   debugOverlaysEnabled = !debugOverlaysEnabled;
-  console.log(`[Debug] Overlays ${debugOverlaysEnabled ? "ENABLED" : "DISABLED"}`);
+  log.log(`[Debug] Overlays ${debugOverlaysEnabled ? "ENABLED" : "DISABLED"}`);
   updateDetectionOverlay();
   if (typeof updateDebugMapOverlays === "function") {
     updateDebugMapOverlays();
@@ -3981,7 +3981,7 @@ function findDistanceToNearestCorner(
 
   const signOffset = getWayAnchorOffsetMeters(wayGeometry, anchor);
   if (!Number.isFinite(signOffset)) {
-    console.warn(`[findDistanceToNearestCorner] signOffset not finite, using DEFAULT ${RULE_CURVE_DEFAULT_LENGTH_METERS}m`);
+    log.warn(`[findDistanceToNearestCorner] signOffset not finite, using DEFAULT ${RULE_CURVE_DEFAULT_LENGTH_METERS}m`);
     return RULE_CURVE_DEFAULT_LENGTH_METERS;
   }
 
@@ -3991,7 +3991,7 @@ function findDistanceToNearestCorner(
 
   for (const node of intersectionNodes || []) {
     if (!Number.isInteger(node?.nodeIndex)) {
-      console.warn(`[findDistanceToNearestCorner] Malformed node missing nodeIndex:`, node);
+      log.warn(`[findDistanceToNearestCorner] Malformed node missing nodeIndex:`, node);
       continue;
     }
 

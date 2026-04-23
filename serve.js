@@ -18,6 +18,43 @@ const PORT = 8080;
 const API_KEY = process.env.GOOGLE_MAPS_API_KEY;
 const LEGACY_UI_PATHS = ['/ui-map', '/ui-panorama', '/ui-upload', '/dist'];
 
+// ── Browser log relay ──
+const LOG_DIR = path.join(__dirname, 'logs');
+const BROWSER_LOG = path.join(LOG_DIR, 'browser.log');
+const BROWSER_LOG_RATE_LIMIT = 500; // max entries written per second
+let browserLogWindowStart = Date.now();
+let browserLogWindowCount = 0;
+try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch (_) {}
+
+const formatLogLine = (entry) => {
+    const ts = entry.ts || new Date().toISOString();
+    const level = (entry.level || 'info').toUpperCase();
+    const url = entry.url ? ` ${entry.url}` : '';
+    const msg = typeof entry.msg === 'string' ? entry.msg : JSON.stringify(entry.msg);
+    let line = `[${ts}] [${level}]${url} ${msg}\n`;
+    if (entry.stack) {
+        const indented = String(entry.stack).split('\n').map((l) => '    ' + l).join('\n');
+        line += indented + '\n';
+    }
+    return line;
+};
+
+const writeBrowserLog = (entries) => {
+    const now = Date.now();
+    if (now - browserLogWindowStart > 1000) {
+        browserLogWindowStart = now;
+        browserLogWindowCount = 0;
+    }
+    const remaining = BROWSER_LOG_RATE_LIMIT - browserLogWindowCount;
+    if (remaining <= 0) return;
+    const take = entries.slice(0, remaining);
+    browserLogWindowCount += take.length;
+    const chunk = take.map(formatLogLine).join('');
+    fs.appendFile(BROWSER_LOG, chunk, (err) => {
+        if (err) console.error('browser log write failed:', err.message);
+    });
+};
+
 // ── Live reload via SSE ──
 const WATCH_EXTENSIONS = new Set(['.html', '.js', '.css']);
 const sseClients = new Set();
@@ -70,6 +107,38 @@ const server = http.createServer((req, res) => {
         });
         sseClients.add(res);
         req.on('close', () => sseClients.delete(res));
+        return;
+    }
+
+    // Browser log relay endpoint
+    if (requestUrl.pathname === '/__logs' && req.method === 'POST') {
+        const chunks = [];
+        let total = 0;
+        const MAX_BYTES = 1 * 1024 * 1024; // 1 MB cap per request
+        let aborted = false;
+        req.on('data', (c) => {
+            if (aborted) return;
+            total += c.length;
+            if (total > MAX_BYTES) {
+                aborted = true;
+                res.writeHead(413); res.end();
+                return;
+            }
+            chunks.push(c);
+        });
+        req.on('end', () => {
+            if (aborted) return;
+            try {
+                const body = Buffer.concat(chunks).toString('utf8');
+                const parsed = JSON.parse(body);
+                const entries = Array.isArray(parsed) ? parsed : [parsed];
+                writeBrowserLog(entries);
+                res.writeHead(204); res.end();
+            } catch (err) {
+                res.writeHead(400); res.end('bad json');
+            }
+        });
+        req.on('error', () => { try { res.writeHead(500); res.end(); } catch (_) {} });
         return;
     }
 

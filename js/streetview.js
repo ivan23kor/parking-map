@@ -22,7 +22,7 @@ async function getSessionToken() {
             }
         } catch (e) {
             // Invalid cache, will create new token
-            console.warn('Invalid cached session token, creating new one');
+            log.warn('Invalid cached session token, creating new one');
         }
         // Clear invalid/expired cache
         localStorage.removeItem(SESSION_KEY);
@@ -49,7 +49,7 @@ async function getSessionToken() {
 
     if (!resp.ok) {
         const errorText = await resp.text();
-        console.error('Session creation failed:', resp.status, errorText);
+        log.error('Session creation failed:', resp.status, errorText);
         
         // Parse error for more helpful message
         let errorMessage = `Failed to create session (${resp.status})`;

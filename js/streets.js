@@ -146,7 +146,7 @@ function clipStreetsToBounds(ways, bounds) {
                 }
             }
         } catch (e) {
-            console.warn('Failed to clip way:', way.id, e);
+            log.warn('Failed to clip way:', way.id, e);
         }
     }
 
@@ -535,7 +535,7 @@ function findIntersectionNodes(wayGeometry, allWays) {
                 }
             }
         } catch (e) {
-            console.warn('[findIntersectionNodes] geometric pass failed:', e);
+            log.warn('[findIntersectionNodes] geometric pass failed:', e);
         }
     }
 

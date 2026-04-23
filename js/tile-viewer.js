@@ -48,7 +48,7 @@ class TileViewer {
 
     if (this._panoId) {
       this.setPano(this._panoId).catch((err) => {
-        console.error("TileViewer init failed:", err);
+        log.error("TileViewer init failed:", err);
       });
     } else {
       this._queueRender();
@@ -82,7 +82,7 @@ class TileViewer {
       try {
         panoData = await resolveStreetViewPanorama({ pano: panoId }, 5000);
       } catch (err) {
-        console.warn("TileViewer failed to resolve panorama metadata:", err);
+        log.warn("TileViewer failed to resolve panorama metadata:", err);
       }
     }
 
@@ -247,7 +247,7 @@ class TileViewer {
       try {
         listener();
       } catch (err) {
-        console.warn(`TileViewer listener failed for ${eventName}:`, err);
+        log.warn(`TileViewer listener failed for ${eventName}:`, err);
       }
     }
   }
@@ -363,7 +363,7 @@ class TileViewer {
       img.onerror = () => reject(new Error(`Failed to load tile ${key}`));
       img.src = url;
     }).catch((err) => {
-      console.warn(err.message);
+      log.warn(err.message);
       return null;
     });
 

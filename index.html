@@ -354,6 +354,9 @@
 
     <pre id="parksight-dump" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;margin:0;padding:20px;background:rgba(0,0,0,0.95);color:#4ade80;font-size:12px;overflow:auto;white-space:pre-wrap;word-break:break-all;cursor:pointer" onclick="this.style.display='none'"></pre>
 
+    <!-- Unified logger (must load first so error hooks and fetch/XHR wrappers install before any other code) -->
+    <script src="js/logger.js"></script>
+
     <!-- External Libraries -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
@@ -376,7 +379,7 @@
       (function loadGoogleMapsAPI() {
         const apiKey = window.GOOGLE_CONFIG?.API_KEY;
         if (!apiKey) {
-          console.error("Google API key not configured");
+          log.error("Google API key not configured");
           return;
         }
         const script = document.createElement("script");
@@ -470,7 +473,7 @@
         try {
           return normalizeSignMapStore(JSON.parse(raw));
         } catch (err) {
-          console.error("Failed to parse persisted sign map data:", err);
+          log.error("Failed to parse persisted sign map data:", err);
           return normalizeSignMapStore(null);
         }
       }
@@ -549,7 +552,7 @@
         try {
           return new google.maps.StreetViewService();
         } catch (err) {
-          console.warn("Failed to create Street View service:", err);
+          log.warn("Failed to create Street View service:", err);
           return null;
         }
       }
@@ -790,7 +793,7 @@
             linkedSpots,
           );
         } catch (err) {
-          console.warn("Failed to sync panorama capture spots on map:", err);
+          log.warn("Failed to sync panorama capture spots on map:", err);
           if (syncToken === panoramaCaptureSpotsSyncToken) {
             clearPanoramaCaptureSpots();
           }
@@ -1003,7 +1006,7 @@
           };
           updateDetectionInfoText();
         } catch (err) {
-          console.warn("Failed to resolve street context for detection:", err);
+          log.warn("Failed to resolve street context for detection:", err);
         }
 
         return currentDetectionContext;
@@ -1047,7 +1050,7 @@
         }
 
         const roadBearing = resolveDetectionRoadBearing(detection);
-        console.log("[centerline] fallback bearing:", roadBearing);
+        log.log("[centerline] fallback bearing:", roadBearing);
         if (!Number.isFinite(roadBearing)) {
           return null;
         }
@@ -1371,12 +1374,12 @@
           if (arrowDir === targetArrowDir || arrowDir === "both") {
             const prec = RULE_PRECEDENCE[rule.category] || 0;
             if (window.DEBUG_RULE_CURVES) {
-              console.log(`  [selectWinner:${targetArrowDir}] rule[${idx}] cat=${rule.category} arrow=${arrowDir} prec=${prec} → INCLUDED`);
+              log.log(`  [selectWinner:${targetArrowDir}] rule[${idx}] cat=${rule.category} arrow=${arrowDir} prec=${prec} → INCLUDED`);
             }
             candidates.push({ rule, ruleIndex: idx, precedence: prec });
           } else if (window.DEBUG_RULE_CURVES) {
             const reason = (!arrowDir || arrowDir === "none") ? 'no arrow — skipped' : 'wrong arrow';
-            console.log(`  [selectWinner:${targetArrowDir}] rule[${idx}] cat=${rule.category} arrow=${arrowDir ?? 'none'} → excluded (${reason})`);
+            log.log(`  [selectWinner:${targetArrowDir}] rule[${idx}] cat=${rule.category} arrow=${arrowDir ?? 'none'} → excluded (${reason})`);
           }
         });
 
@@ -1385,7 +1388,7 @@
         candidates.sort((a, b) => b.precedence - a.precedence);
         const winner = candidates[0];
         if (window.DEBUG_RULE_CURVES) {
-          console.log(`  [selectWinner:${targetArrowDir}] → winner: ${winner.rule.category} (arrow=${winner.rule.arrow_direction}, prec=${winner.precedence})`);
+          log.log(`  [selectWinner:${targetArrowDir}] → winner: ${winner.rule.category} (arrow=${winner.rule.arrow_direction}, prec=${winner.precedence})`);
         }
         return winner;
       }
@@ -1402,7 +1405,7 @@
           const arrowDir = tz.arrow_direction;
           const applies = !arrowDir || arrowDir === "none" || arrowDir === "both" || arrowDir === targetArrowDir;
           if (window.DEBUG_RULE_CURVES) {
-            console.log(`  [towZone:${targetArrowDir}] tz[${idx}] arrow=${arrowDir ?? 'none'} → ${applies ? 'INCLUDED' : 'excluded'}`);
+            log.log(`  [towZone:${targetArrowDir}] tz[${idx}] arrow=${arrowDir ?? 'none'} → ${applies ? 'INCLUDED' : 'excluded'}`);
           }
           return applies;
         });
@@ -1989,7 +1992,7 @@
           sign.previewRefined = true;
           return refinedView;
         } catch (err) {
-          console.warn("Preview refinement failed:", err);
+          log.warn("Preview refinement failed:", err);
           return null;
         }
       }
@@ -2077,7 +2080,7 @@
             persistLatestSignMapData(latestRenderedSignMapData);
           }
         } catch (err) {
-          console.error("Failed to load sign preview:", err);
+          log.error("Failed to load sign preview:", err);
           sign.previewError = "Preview unavailable.";
           renderSignPreviewContent(container, sign, {
             error: sign.previewError,
@@ -2120,7 +2123,7 @@
               sign.previewSrc = preview.src;
               delete sign.previewError;
             } catch (err) {
-              console.error("Failed to prefetch sign preview:", err);
+              log.error("Failed to prefetch sign preview:", err);
             }
           }),
         );
@@ -2371,7 +2374,7 @@
               renderPanoNetworkOnMap(network);
             }
           } catch (err) {
-            console.error("Street View lookup failed:", err);
+            log.error("Street View lookup failed:", err);
             statusEl.textContent = "No Street View coverage nearby.";
           }
         });
@@ -2409,7 +2412,7 @@
 
           initPanoramaForContext();
         } catch (err) {
-          console.error("Default panorama init failed:", err);
+          log.error("Default panorama init failed:", err);
           statusEl.textContent = "Failed to load default panorama.";
         }
       }
@@ -2545,13 +2548,13 @@
             try {
               await plotDetectedSigns(allWays);
             } catch (plotErr) {
-              console.error("plotDetectedSigns error:", plotErr);
+              log.error("plotDetectedSigns error:", plotErr);
             }
           } else {
-            console.log("No detections to plot");
+            log.log("No detections to plot");
           }
         } catch (err) {
-          console.error("Re-detection failed:", err);
+          log.error("Re-detection failed:", err);
           statusEl.textContent = "Detection failed.";
         } finally {
           detectBtn.disabled = false;
@@ -2563,7 +2566,7 @@
        */
       async function plotDetectedSigns(allWays = null) {
         if (currentDetections.length === 0 || !currentDetectionContext) {
-          console.warn("plotDetectedSigns: nothing to render");
+          log.warn("plotDetectedSigns: nothing to render");
           return;
         }
 
@@ -2667,7 +2670,7 @@
             await renderSignMapData(hydratedStore, allWays, newSignUuids, _pendingSignAutoOpen);
           })
           .catch((previewErr) => {
-            console.warn("Sign preview hydration failed:", previewErr);
+            log.warn("Sign preview hydration failed:", previewErr);
           });
       }
 
@@ -2738,7 +2741,7 @@
             dumpEl.textContent = json;
             dumpEl.style.display = "block";
           }
-          console.log("%c[parksight-dump]", "color:#4ade80;font-weight:bold", state);
+          log.log("%c[parksight-dump]", "color:#4ade80;font-weight:bold", state);
 
           const apiUrl = window.DETECTION_CONFIG?.API_URL;
           if (apiUrl) {
@@ -2751,7 +2754,7 @@
 
           return state;
         } catch (err) {
-          console.error("_dump() error:", err);
+          log.error("_dump() error:", err);
           return state;
         }
       };
@@ -2793,7 +2796,7 @@
         const popupContainer = container.closest(".sign-preview-popup");
         const sign = popupContainer?._signRef;
         if (!sign) {
-          console.warn("CROP_ANNOTATION: could not find sign data");
+          log.warn("CROP_ANNOTATION: could not find sign data");
           return;
         }
 
@@ -2821,8 +2824,8 @@
           cropDiagnostics: diag,
         };
         _annotations.push(annotation);
-        console.log("CROP_ANNOTATION", annotation);
-        console.log(`#${_annotations.length} offset: ${offsetY > 0 ? "+" : ""}${offsetY}px`);
+        log.log("CROP_ANNOTATION", annotation);
+        log.log(`#${_annotations.length} offset: ${offsetY > 0 ? "+" : ""}${offsetY}px`);
 
         // Visual feedback — briefly flash the line green
         const line = container.querySelector(".annotation-line");
@@ -2837,7 +2840,7 @@
 
       // Dump all annotations as CSV to console
       window._dumpAnnotations = () => {
-        if (_annotations.length === 0) { console.log("No annotations"); return; }
+        if (_annotations.length === 0) { log.log("No annotations"); return; }
         const header = "offsetY,signTopY,expectedSignTopY,cropW,cropH,signW,signH,tilt,panoHeading,cropHeading,cropPitch,detPitch,detAngH,yCorrection";
         const rows = _annotations.map(a => [
           a.offsetY, a.signTopY, a.expectedSignTopY,
@@ -2848,7 +2851,7 @@
           a.detection?.pitch?.toFixed(4), a.detection?.angularHeight?.toFixed(4),
           a.corrected?.yCorrection?.toFixed(2),
         ].join(","));
-        console.log("ANNOTATIONS_CSV:\n" + header + "\n" + rows.join("\n"));
+        log.log("ANNOTATIONS_CSV:\n" + header + "\n" + rows.join("\n"));
       };
     </script>
   </body>

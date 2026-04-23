@@ -250,7 +250,7 @@ async function _discoverSeedPano(seedLatLng) {
       lng: typeof loc.latLng?.lng === "function" ? loc.latLng.lng() : loc.latLng?.lng,
     };
   } catch (err) {
-    console.warn("[area-scan] seed pano discovery failed:", err);
+    log.warn("[area-scan] seed pano discovery failed:", err);
     return null;
   }
 }
@@ -375,7 +375,7 @@ async function startAreaScan(polygonFeature) {
 
   // Cluster into islands
   const islands = _findStreetIslands(insideWays);
-  console.log(`[area-scan] ${insideWays.length} ways → ${islands.length} islands`);
+  log.log(`[area-scan] ${insideWays.length} ways → ${islands.length} islands`);
 
   _updateStatus(`Found ${islands.length} street island(s), scanning\u2026`);
 
@@ -385,7 +385,7 @@ async function startAreaScan(polygonFeature) {
 
     const seed = await _discoverSeedPano(island.seedLatLng);
     if (!seed) {
-      console.warn("[area-scan] no seed pano for island at", island.seedLatLng);
+      log.warn("[area-scan] no seed pano for island at", island.seedLatLng);
       continue;
     }
 
@@ -432,7 +432,7 @@ async function _processPano(panoId) {
 
   // Check cache
   if (scanCache.has(panoId)) {
-    console.log(`[area-scan] cache hit: ${panoId}`);
+    log.log(`[area-scan] cache hit: ${panoId}`);
     const cached = scanCache.get(panoId);
     // Re-render cached detection
     _promoteMarker(panoId, "cached");
@@ -449,7 +449,7 @@ async function _processPano(panoId) {
     const meta = await fetchStreetViewMetadata(panoId, session);
     const camLat = meta?.lat ?? entry.lat;
     const camLng = meta?.lng ?? entry.lng;
-    console.log('[SCAN-TRACE] metadata', JSON.stringify({
+    log.log('[SCAN-TRACE] metadata', JSON.stringify({
       panoId, bfsLat: entry.lat, bfsLng: entry.lng, metaLat: camLat, metaLng: camLng,
       metaHeading: meta?.heading, metaTilt: meta?.tilt,
       coordDriftMeters: (Math.sqrt((camLat - entry.lat)**2 + (camLng - entry.lng)**2) * 111320).toFixed(1),
@@ -476,7 +476,7 @@ async function _processPano(panoId) {
       // Two-way: right curb forward + right curb reverse
       headings = [_normalize(b + 45), _normalize(b - 135)];
     }
-    console.log('[SCAN-TRACE] headings', JSON.stringify({ panoId, streetBearing: b, oneway, headings, streetName }));
+    log.log('[SCAN-TRACE] headings', JSON.stringify({ panoId, streetBearing: b, oneway, headings, streetName }));
 
     // 4. Run detection for each heading
     const allDetections = [];
@@ -489,7 +489,7 @@ async function _processPano(panoId) {
         allDetections.push(...result.value.detections);
       }
     }
-    console.log('[SCAN-TRACE] detections', JSON.stringify({
+    log.log('[SCAN-TRACE] detections', JSON.stringify({
       panoId, rawDetections: allDetections.length,
       perHeading: detectionResults.map((r, i) => ({
         heading: headings[i], status: r.status,
@@ -500,7 +500,7 @@ async function _processPano(panoId) {
 
     // 5. Cluster
     const clustered = clusterAngularDetections(allDetections);
-    console.log('[SCAN-TRACE] clusters', JSON.stringify({
+    log.log('[SCAN-TRACE] clusters', JSON.stringify({
       panoId, rawCount: allDetections.length, clusteredCount: clustered.length,
       clusters: clustered.map(c => ({
         heading: c.heading?.toFixed(1), pitch: c.pitch?.toFixed(1),
@@ -539,7 +539,7 @@ async function _processPano(panoId) {
 
     // 9. Run OCR on clustered detections
     await runOcrOnDetections(panoId, camLat, camLng, clustered);
-    console.log('[SCAN-TRACE] ocr', JSON.stringify({
+    log.log('[SCAN-TRACE] ocr', JSON.stringify({
       panoId, results: clustered.map((c, i) => ({
         index: i, isParkingSign: c.ocrResult?.is_parking_sign,
         ocrError: c.ocrError || null, rules: c.ocrResult?.rules?.length ?? 0,
@@ -589,7 +589,7 @@ async function _processPano(panoId) {
     currentDetections = prevDetections;
 
   } catch (err) {
-    console.error(`[area-scan] processPano ${panoId} failed:`, err);
+    log.error(`[area-scan] processPano ${panoId} failed:`, err);
     _promoteMarker(panoId, "error");
     state.ocrDone++;
   }
@@ -621,5 +621,5 @@ function initAreaScan() {
   map.on("mousedown", _onMapMouseDown);
   map.on("mousemove", _onMapMouseMove);
   map.on("mouseup", _onMapMouseUp);
-  console.log("[area-scan] initialized");
+  log.log("[area-scan] initialized");
 }
