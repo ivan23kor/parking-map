@@ -20,7 +20,7 @@ window.GOOGLE_CONFIG = {
 
 // Parking sign detection API configuration
 window.DETECTION_CONFIG = {
-    API_URL: 'http://127.0.0.1:8000',
+    API_URL: '/api',
     CONFIDENCE_THRESHOLD: 0.15,
     HORIZON_HALF_BAND_DEGREES: 6.67,
 };
