@@ -124,4 +124,7 @@ echo "UI: http://127.0.0.1:${WEB_PORT}/"
 echo "API: http://127.0.0.1:${BACKEND_PORT}/docs"
 echo "Logs: $LOG_DIR/backend.log and $LOG_DIR/web.log"
 
-wait "$BACKEND_PID" "$WEB_PID"
+# Wait for both processes; trap will handle Ctrl+C
+while kill -0 "$BACKEND_PID" "$WEB_PID" 2>/dev/null; do
+  sleep 1
+done
